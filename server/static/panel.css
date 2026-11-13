@@ -428,3 +428,36 @@ svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 @media (max-width:900px){
   .syscols{grid-template-columns:1fr}
 }
+
+/* ---------------- pin + client editor ---------------- */
+.card.pinned{border-color:#3a3320;box-shadow:inset 0 0 0 1px #2a2413}
+.card.pinned:hover{border-color:#5c4a12}
+.thumb-actions button.on{color:#ffd166;background:rgba(60,48,10,.82);border-color:#5c4a12}
+.badge.grp{background:#2a3350;color:#c7d3ff}
+
+.sheet.narrow{width:min(460px,100%);height:auto}
+.ce-body{padding:16px 18px 18px;display:flex;flex-direction:column;gap:13px}
+.ce-field{display:flex;flex-direction:column;gap:6px;font-size:10px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--dim)}
+.ce-field input,.ce-field textarea{
+  background:#080b14;border:1px solid var(--line2);border-radius:8px;color:var(--txt);
+  padding:9px 11px;font:inherit;font-size:13px;text-transform:none;letter-spacing:0;
+  outline:none;resize:vertical;
+}
+.ce-field input:focus,.ce-field textarea:focus{border-color:#39456b}
+.ce-check{display:flex;align-items:center;gap:8px;color:#c2ccdf;font-size:12px}
+.ce-check input{width:15px;height:15px;accent-color:var(--accent)}
+.ce-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
+
+/* ---------------- spy / tools ---------------- */
+.media-grid.grow{flex:1;min-height:0}
+.winput{
+  background:#080b14;border:1px solid var(--line2);border-radius:8px;color:var(--txt);
+  padding:8px 10px;outline:none;font:inherit;font-size:12px;width:100%;
+}
+.winput:focus{border-color:#39456b}
+.row2{display:flex;gap:6px;flex-wrap:wrap}
+.row2 .btn{flex:1;min-width:96px}
+.btn.danger{color:#ffb4b4;border-color:#3a2226;background:#1b1114}
+.btn.danger:hover{color:#fff;border-color:#5a2a30;background:#25161a}
+
