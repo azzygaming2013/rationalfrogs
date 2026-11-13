@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>wr-c2 // panel</title>
+<link rel="stylesheet" href="/static/panel.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="dot"></span><b>wr-c2</b><span class="ver">v1.0</span></div>
+  <div class="status">
+    <span id="linkState" class="pill off">offline</span>
+    <span class="pill"><b id="onlineCount">0</b>/<span id="totalCount">0</span> agents</span>
+  </div>
+  <div class="right"><a href="/logout" class="ghost">logout</a></div>
+</header>
+
+<div class="layout">
+  <aside class="side">
+    <div class="side-head">targets</div>
+    <div id="agentList" class="agent-list">
+      <div class="empty">no agents</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div id="welcome" class="welcome">
+      <div class="glyph">&gt;_</div>
+      <h2>select a target</h2>
+      <p>agents connect through the resolver file. change the raw URL, they follow.</p>
+    </div>
+
+    <section id="work" class="work hidden">
+      <div class="agent-bar">
+        <div class="who">
+          <div class="host" id="aHost">—</div>
+          <div class="meta">
+            <span id="aUser">—</span>
+            <span class="sep">·</span>
+            <span id="aOs">—</span>
+            <span class="sep">·</span>
+            <span id="aPid">—</span>
+            <span id="aAdmin" class="badge hidden">admin</span>
+          </div>
+        </div>
+        <div class="buttons" id="toolbar">
+          <button data-k="sysinfo">sysinfo</button>
+          <button data-k="screenshot">screenshot</button>
+          <button data-k="ls">files</button>
+          <button data-k="get">download</button>
+          <button data-k="put">upload</button>
+          <button data-k="keylog">keylog</button>
+          <button data-k="persist">persist</button>
+          <button data-k="kill" class="danger">kill session</button>
+        </div>
+      </div>
+
+      <div id="terminal" class="terminal"></div>
+
+      <form id="cmdForm" class="cmdrow">
+        <select id="shell">
+          <option value="cmd">cmd</option>
+          <option value="powershell">ps</option>
+        </select>
+        <input id="cmdInput" placeholder="whoami /all" autocomplete="off" spellcheck="false">
+        <button type="submit">send</button>
+      </form>
+
+      <div class="drawer">
+        <div class="tabs">
+          <button class="tab active" data-tab="files">files <b id="fileCount">0</b></button>
+          <button class="tab" data-tab="keys">keylog</button>
+          <button class="tab" data-tab="sys">sysinfo</button>
+          <button class="tab" data-tab="raw">raw</button>
+        </div>
+        <div class="tabbody">
+          <div id="tab-files" class="tabpane active"></div>
+          <div id="tab-keys" class="tabpane"><pre id="keylogOut" class="pre"></pre></div>
+          <div id="tab-sys" class="tabpane"><pre id="sysOut" class="pre"></pre></div>
+          <div id="tab-raw" class="tabpane"><pre id="rawOut" class="pre"></pre></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<input type="file" id="filePicker" class="hidden">
+<div id="toast" class="toast"></div>
+
+<script src="/static/panel.js"></script>
+</body>
+</html>

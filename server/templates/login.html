@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>wr // access</title>
+<style>
+  :root{
+    --bg:#08090b; --panel:#0e1014; --line:#1c2027; --txt:#c9d1d9;
+    --dim:#5c6673; --accent:#ff4d4d; --ok:#6bff87;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:
+      radial-gradient(900px 600px at 70% -10%, #171a22 0%, transparent 60%),
+      var(--bg);
+    color:var(--txt);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    display:grid;place-items:center;
+  }
+  .card{
+    width:340px;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:26px 24px 22px;box-shadow:0 30px 80px -20px #000;
+  }
+  .brand{display:flex;align-items:center;gap:9px;margin-bottom:22px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);
+       box-shadow:0 0 12px var(--accent);animation:pulse 2.4s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .brand b{letter-spacing:.22em;font-size:12px;font-weight:600;text-transform:uppercase}
+  label{display:block;font-size:10px;letter-spacing:.18em;color:var(--dim);
+        text-transform:uppercase;margin-bottom:7px}
+  input{
+    width:100%;padding:11px 12px;background:#050507;border:1px solid var(--line);
+    border-radius:6px;color:var(--txt);font:inherit;outline:none;
+  }
+  input:focus{border-color:#3a4450;box-shadow:0 0 0 3px #ffffff08}
+  button{
+    width:100%;margin-top:16px;padding:11px;border:0;border-radius:6px;cursor:pointer;
+    background:var(--accent);color:#120505;font:600 12px/1 ui-monospace,monospace;
+    letter-spacing:.2em;text-transform:uppercase;
+  }
+  button:hover{filter:brightness(1.1)}
+  .err{margin-top:14px;color:var(--accent);font-size:12px;letter-spacing:.05em}
+  .foot{margin-top:20px;font-size:10px;color:var(--dim);letter-spacing:.12em}
+</style>
+</head>
+<body>
+  <form class="card" method="post" action="/login">
+    <div class="brand"><span class="dot"></span><b>wr-c2</b></div>
+    <label for="p">access key</label>
+    <input id="p" name="password" type="password" autocomplete="current-password" autofocus>
+    <button type="submit">authenticate</button>
+    {% if request.query_params.get('e') %}<div class="err">invalid credentials</div>{% endif %}
+    <div class="foot">session expires in 7d</div>
+  </form>
+</body>
+</html>
