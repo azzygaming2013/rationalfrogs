@@ -91,22 +91,24 @@ namespace WRAgent
             info["type"] = "hello";
             info["agent_id"] = Util.MachineId();
             info["ver"] = BuildInfo.Version;
+            info["monitors"] = SystemModule.MonitorCount();
+            info["gpu"] = SystemModule.GpuName();
             return SendAsync(info);
         }
 
         private async Task ReceiveLoopAsync()
         {
             var ws = _ws;
-            var buffer = new byte[16 * 1024];
+            var buffer = new byte[32 * 1024];
             using var ms = new MemoryStream();
 
             var heartbeat = Task.Run(async () =>
             {
                 while (ws != null && ws.State == WebSocketState.Open)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(25)).ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromSeconds(20)).ConfigureAwait(false);
                     if (ws.State != WebSocketState.Open) return;
-                    await SendAsync(new JsonObject { ["type"] = "pong" }).ConfigureAwait(false);
+                    await SendAsync(new JsonObject { ["type"] = "pong", ["ts"] = 0 }).ConfigureAwait(false);
                 }
             });
 
@@ -135,8 +137,20 @@ namespace WRAgent
                     catch { continue; }
                     if (msg is null) continue;
 
-                    if (Util.Str(msg, "type") == "cmd")
-                        _queue.Add(msg);
+                    switch (Util.Str(msg, "type"))
+                    {
+                        case "cmd":
+                            _queue.Add(msg);
+                            break;
+                        case "ping":
+                            // echo the server clock straight back so it can measure RTT
+                            _ = SendAsync(new JsonObject
+                            {
+                                ["type"] = "pong",
+                                ["ts"] = msg["ts"]?.DeepClone()
+                            });
+                            break;
+                    }
                 }
             }
             catch (Exception e)
@@ -193,12 +207,23 @@ namespace WRAgent
             if (ws is null || ws.State != WebSocketState.Open || obj is null) return;
 
             var bytes = Encoding.UTF8.GetBytes(obj.ToJsonString());
+            await RawSend(bytes, WebSocketMessageType.Text).ConfigureAwait(false);
+        }
+
+        /// <summary>Screen preview frames ride as binary frames — no base64 tax.</summary>
+        public Task SendBinaryAsync(byte[] data) => RawSend(data, WebSocketMessageType.Binary);
+
+        private async Task RawSend(byte[] bytes, WebSocketMessageType kind)
+        {
+            var ws = _ws;
+            if (ws is null || ws.State != WebSocketState.Open || bytes is null) return;
+
             await _sendLock.WaitAsync().ConfigureAwait(false);
             try
             {
                 if (ws.State == WebSocketState.Open)
-                    await ws.SendAsync(new ArraySegment<byte>(bytes),
-                        WebSocketMessageType.Text, true, _cts.Token).ConfigureAwait(false);
+                    await ws.SendAsync(new ArraySegment<byte>(bytes), kind, true, _cts.Token)
+                            .ConfigureAwait(false);
             }
             catch (Exception e)
             {
@@ -220,11 +245,32 @@ namespace WRAgent
             }).ConfigureAwait(false);
         }
 
-        /// <summary>Chunked binary transfer to the panel (downloads, screenshots).</summary>
+        public Task EmitProgress(string xfer, int pct) =>
+            SendAsync(new JsonObject
+            {
+                ["type"] = "event",
+                ["kind"] = "progress",
+                ["xfer"] = xfer,
+                ["pct"] = pct
+            });
+
+        /// <summary>Chunked binary transfer to the panel (downloads, screenshots, audio).</summary>
         public async Task EmitBlobAsync(string kind, JsonObject meta, byte[] data)
         {
             var xid = Guid.NewGuid().ToString("N");
             var total = data.Length == 0 ? 1 : (int)Math.Ceiling(data.Length / (double)BlobChunk);
+
+            // announce first so the panel can draw a progress row immediately
+            await SendAsync(new JsonObject
+            {
+                ["type"] = "event",
+                ["kind"] = "xfer:start",
+                ["xfer"] = xid,
+                ["name"] = kind,
+                ["total"] = total,
+                ["size"] = data.Length,
+                ["meta"] = meta?.DeepClone() as JsonObject ?? new JsonObject()
+            }).ConfigureAwait(false);
 
             for (var i = 0; i < total; i++)
             {
@@ -241,6 +287,9 @@ namespace WRAgent
                     ["meta"] = meta?.DeepClone() as JsonObject ?? new JsonObject(),
                     ["data"] = len > 0 ? Convert.ToBase64String(data, off, len) : ""
                 }).ConfigureAwait(false);
+
+                if (total > 2)
+                    await EmitProgress(xid, (int)((i + 1) * 100.0 / total)).ConfigureAwait(false);
             }
         }
     }

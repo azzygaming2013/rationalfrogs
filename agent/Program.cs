@@ -40,6 +40,7 @@ namespace WRAgent
 
             var form = new HiddenForm();
             _ = Transport.I.RunAsync();
+            CaptureModule.Start();
 
             Log.W("agent up");
             Application.Run(form);

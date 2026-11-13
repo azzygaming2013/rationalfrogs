@@ -12,6 +12,7 @@
     <AssemblyName>wrsvc</AssemblyName>
     <RootNamespace>WRAgent</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon></ApplicationIcon>
 
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

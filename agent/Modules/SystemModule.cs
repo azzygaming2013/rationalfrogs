@@ -34,11 +34,94 @@ namespace WRAgent
             {
                 ["host"] = Environment.MachineName,
                 ["user"] = Environment.UserName,
+                ["domain"] = Environment.UserDomainName,
                 ["os"] = OsName(),
-                ["arch"] = Environment.Is64BitOperatingSystem ? "x64" : "x86",
+                ["os_short"] = OsShort(),
+                ["arch"] = Environment.Is64BitOperatingSystem ? "amd64" : "x86",
                 ["pid"] = Environment.ProcessId,
                 ["admin"] = IsAdmin(),
-                ["ips"] = ips
+                ["ips"] = ips,
+                ["cpu"] = CpuShort(),
+                ["ram"] = TotalRam() / 1073741824.0,
+                ["tag"] = BuildInfo.AgentTag
+            };
+        }
+
+        public static int MonitorCount()
+        {
+            try { return System.Windows.Forms.Screen.AllScreens.Length; }
+            catch { return 1; }
+        }
+
+        public static string GpuName()
+        {
+            try
+            {
+                using var searcher = new ManagementObjectSearcher(
+                    "SELECT Name FROM Win32_VideoController");
+                foreach (ManagementObject mo in searcher.Get())
+                {
+                    var name = mo["Name"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(name) && !name.Contains("Basic Display"))
+                        return name.Trim();
+                }
+            }
+            catch { }
+            return "unknown";
+        }
+
+        public static string OsShort()
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+                var build = int.TryParse(key?.GetValue("CurrentBuild")?.ToString(), out var b) ? b : 0;
+                return build >= 22000 ? "W11" : "W10";
+            }
+            catch { return "WIN"; }
+        }
+
+        /// <summary>"Intel(R) Core(TM) i5-13400F CPU @ 2.50GHz" -> "i5-13400F"</summary>
+        private static string CpuShort()
+        {
+            var raw = CpuName();
+            var m = System.Text.RegularExpressions.Regex.Match(raw,
+                @"(i[3579][- ]\d{4,5}[A-Z]{0,2}|Ryzen\s+\d\s+\d{4}[A-Z]{0,2}|Ultra\s+\d\s+\d{3}[A-Z]{0,2})");
+            if (m.Success) return m.Value.Replace(" ", " ");
+            return raw.Length > 26 ? raw.Substring(0, 26) : raw;
+        }
+
+        public static JsonObject Drives()
+        {
+            var arr = new JsonArray();
+            try
+            {
+                foreach (var d in DriveInfo.GetDrives())
+                {
+                    string label = null;
+                    try { label = d.VolumeLabel; } catch { }
+                    arr.Add(new JsonObject
+                    {
+                        ["name"] = d.Name,
+                        ["type"] = d.DriveType.ToString(),
+                        ["label"] = label ?? "",
+                        ["format"] = d.IsReady ? d.DriveFormat : "",
+                        ["total"] = d.IsReady ? d.TotalSize : 0,
+                        ["free"] = d.IsReady ? d.AvailableFreeSpace : 0
+                    });
+                }
+            }
+            catch (Exception e)
+            {
+                return new JsonObject { ["ok"] = false, ["error"] = e.Message };
+            }
+
+            return new JsonObject
+            {
+                ["ok"] = true,
+                ["stdout"] = string.Join("\n", arr.Select(a => $"{a["name"],-4} {a["type"],-8} {a["label"]}")),
+                ["meta"] = new JsonObject { ["drives"] = arr }
             };
         }
 
