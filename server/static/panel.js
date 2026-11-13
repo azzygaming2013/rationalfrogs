@@ -9,6 +9,9 @@
     view: 'grid', onlineOnly: false, sort: 'host',
     selection: new Set(), treeRoot: null, cwd: '',
     lastDetail: null,
+    control: false, downBtn: null, lastMove: 0,
+    inPreview: false, sysTimer: null,
+    thumbs: {}, screenUrl: null,
   };
 
   const ICON = {
@@ -224,10 +227,11 @@
     $('#mPing').textContent = fmtPing(a.ping);
     $('#term').innerHTML = '';
     $('#keyOut').textContent = '';
-    $('#sysInfo').innerHTML = '';
     $('#sysOut').textContent = '';
     $('#audioWrap').innerHTML = '';
     $('#screenImg').removeAttribute('src');
+    $('#screenEmpty').classList.remove('hidden');
+    setControl(false, true);
 
     term(`session ${a.host} · ${a.online ? 'live' : 'offline'}`, 'sys');
 
@@ -247,22 +251,73 @@
     loadDrives();
   }
 
-  function closeModal() { $('#modal').classList.add('hidden'); S.sel = null; }
+  function closeModal() {
+    leavePreview();
+    stopSysPoll();
+    setControl(false, true);
+    $('#modal').classList.add('hidden');
+    S.sel = null;
+  }
 
   function switchPane(name) {
     $$('.rtab').forEach((t) => t.classList.toggle('active', t.dataset.pane === name));
     $$('.pane').forEach((p) => p.classList.toggle('active', p.id === 'pane-' + name));
-    if (name === 'screen') showScreen();
+    if (name === 'screen') { showScreen(); enterPreview(); }
+    else leavePreview();
+    if (name === 'system') startSysPoll();
+    else stopSysPoll();
   }
 
   function showScreen() {
     if (!S.sel) return;
     const a = agentById(S.sel);
     const img = $('#screenImg');
+    if (S.screenUrl) { URL.revokeObjectURL(S.screenUrl); S.screenUrl = null; }
     if (a && a.has_preview) {
-      img.src = `/api/agents/${S.sel}/preview.jpg?n=${a.frame}`;
+      img.src = `/api/agents/${S.sel}/preview.jpg?n=${a.frame || 0}`;
       $('#screenEmpty').classList.add('hidden');
     }
+  }
+
+  function enterPreview() {
+    if (S.inPreview || !S.sel) return;
+    S.inPreview = true;
+    sendSilent('preview', {
+      action: 'set',
+      interval_ms: +$('#pvInterval').value,
+      width: +$('#pvWidth').value,
+      quality: 55,
+      paused: false,
+    });
+  }
+
+  function leavePreview() {
+    if (!S.inPreview) return;
+    S.inPreview = false;
+    setControl(false, true);
+    sendSilent('preview', { action: 'set', interval_ms: 4000, width: 640, quality: 45, paused: false });
+  }
+
+  function setControl(on, quiet) {
+    S.control = on;
+    const btn = $('#ctlToggle');
+    if (btn) {
+      btn.textContent = on ? 'control on' : 'control off';
+      btn.classList.toggle('accent', on);
+    }
+    $('#screenWrap')?.classList.toggle('ctl', on);
+    $('#ctlHint')?.classList.toggle('hidden', on);
+    $('#ctlDot')?.classList.toggle('hidden', !on);
+    if (on) $('#screenWrap')?.focus();
+    if (!quiet && S.sel) {
+      sendSilent('preview', {
+        action: 'set',
+        interval_ms: on ? Math.min(250, +$('#pvInterval').value) : +$('#pvInterval').value,
+        width: +$('#pvWidth').value,
+        quality: on ? 60 : 55,
+      });
+    }
+    if (!on) S.downBtn = null;
   }
 
   function term(text, cls = 'out') {
@@ -286,18 +341,119 @@
   }
 
   function renderStats(agent, meta) {
-    const box = $('#sysInfo');
+    const box = $('#sysOut');
+    if (!box) return;
     if (agent) {
-      box.innerHTML = [
+      const rows = [
         ['host', agent.host], ['user', agent.user], ['ip', agent.ip],
         ['os', agent.os], ['arch', agent.arch], ['cpu', agent.cpu],
         ['ram', (Math.round(agent.ram) || 0) + ' GB'], ['gpu', agent.gpu],
         ['monitors', agent.monitors], ['admin', agent.admin ? 'yes' : 'no'],
-      ].map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${esc(v ?? '—')}</div></div>`).join('');
+      ];
+      box.textContent = rows.map(([k, v]) => k.padEnd(10) + (v ?? '—')).join('\n');
     } else if (meta) {
       const flat = Object.entries(meta).filter(([, v]) => typeof v !== 'object' || v === null);
-      box.innerHTML = flat.map(([k, v]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+      box.textContent = flat.map(([k, v]) => String(k).padEnd(10) + v).join('\n');
     }
+  }
+
+  // ------------------------------------------------------------------
+  // live system dashboard
+  // ------------------------------------------------------------------
+  function startSysPoll() {
+    stopSysPoll();
+    if (!S.sel) return;
+    refreshSys();
+    S.sysTimer = setInterval(refreshSys, 4000);
+  }
+
+  function stopSysPoll() {
+    if (S.sysTimer) { clearInterval(S.sysTimer); S.sysTimer = null; }
+  }
+
+  function refreshSys() {
+    if (!S.sel) return;
+    const a = agentById(S.sel);
+    if (!a || !a.online) return;
+    sendSilent('sysstat', {});
+  }
+
+  function barClass(pct) {
+    return pct >= 85 ? 'hot' : pct >= 60 ? 'mid' : '';
+  }
+
+  function uptimeText(sec) {
+    sec = Math.max(0, +sec || 0);
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  function rate(bps) {
+    if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
+    if (bps >= 1024) return Math.round(bps / 1024) + ' KB/s';
+    return Math.round(bps) + ' B/s';
+  }
+
+  function renderSysStat(meta) {
+    if (!meta) return;
+    const cpu = +meta.cpu || 0;
+    const memPct = +meta.mem_pct || 0;
+
+    $('#stCpu').textContent = cpu.toFixed(1) + '% · ' + (meta.cores || 0) + ' cores';
+    const cb = $('#stCpuBar');
+    cb.style.width = Math.min(100, cpu) + '%';
+    cb.className = barClass(cpu);
+
+    $('#stRam').textContent = `${bytes(meta.mem_used)} / ${bytes(meta.mem_total)}`;
+    const rb = $('#stRamBar');
+    rb.style.width = Math.min(100, memPct) + '%';
+    rb.className = barClass(memPct);
+
+    $('#stUp').textContent = uptimeText(meta.uptime_sec);
+
+    const rx = +meta.net_rx || 0, tx = +meta.net_tx || 0;
+    $('#stNet').innerHTML = rx || tx
+      ? `<span>${rate(rx)} in</span><span class="ul">${rate(tx)} out</span>`
+      : '<span>idle</span>';
+
+    const bat = meta.battery || {};
+    $('#stPower').textContent = bat.present
+      ? `${bat.pct}% ${bat.ac ? '· ac' : '· battery'}`
+      : 'ac power';
+
+    const disks = meta.disks || [];
+    $('#sysDisks').innerHTML = disks.map((d) => `
+      <div class="diskrow">
+        <div class="top"><b>${esc(d.name)}</b><span>${esc(d.label || '')}</span>
+          <span class="sz">${(+d.pct).toFixed(0)}% · ${bytes(d.free)} free / ${bytes(d.total)}</span></div>
+        <div class="bar"><i class="${barClass(d.pct)}" style="width:${Math.min(100, d.pct)}%"></i></div>
+      </div>`).join('') || '<div class="diskrow"><span class="sz">no fixed drives</span></div>';
+
+    const hint = $('#sysProcHint');
+    if (hint) hint.textContent = `${meta.procs || 0} running · click to kill`;
+
+    const procs = meta.top || [];
+    $('#sysProcs').innerHTML = procs.map((p) => `
+      <div class="procrow" data-pid="${p.pid}" data-name="${esc(p.name)}">
+        <span class="nm">${esc(p.name)}</span>
+        <span class="pid">${p.pid}</span>
+        <span class="cpu">${(+p.cpu).toFixed(1)}%</span>
+        <span class="ram">${bytes(p.ws)}</span>
+        <span class="kill">kill</span>
+      </div>`).join('') || '<div class="procrow"><span class="nm">idle</span></div>';
+  }
+
+  function wireSysProcs() {
+    $('#sysProcs').addEventListener('click', (e) => {
+      const row = e.target.closest('.procrow');
+      if (!row || !row.dataset.pid) return;
+      const pid = +row.dataset.pid;
+      const name = row.dataset.name || String(pid);
+      if (!confirm(`kill ${name} (pid ${pid})?`)) return;
+      run('kill', { pid }, `kill ${name} (${pid})`);
+    });
   }
 
   // ------------------------------------------------------------------
@@ -315,6 +471,29 @@
       if (label) term(label, 'cmd');
       else if (module === 'shell') term(args.cmd || '', 'cmd');
     } catch (e) { term(e.message, 'err'); }
+  }
+
+  async function sendSilent(module, args = {}) {
+    if (!S.sel) return null;
+    try {
+      return await api(`/api/agents/${encodeURIComponent(S.sel)}/cmd`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ module, args, silent: true }),
+      });
+    } catch { return null; }
+  }
+
+  // latency-critical input rides the panel websocket (no HTTP round trip)
+  function sendCtl(module, args = {}) {
+    if (!S.sel) return false;
+    const ws = S.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ t: 'ctl', agent_id: S.sel, module, args }));
+      return true;
+    }
+    sendSilent(module, args);
+    return false;
   }
 
   // ------------------------------------------------------------------
@@ -592,6 +771,103 @@
     };
   }
 
+  function wireScreenControls() {
+    const wrap = $('#screenWrap');
+    if (!wrap) return;
+
+    wrap.addEventListener('mousedown', (e) => {
+      if (!S.control) { toast('turn control on first'); return; }
+      if (e.button > 2) return;
+      e.preventDefault();
+      wrap.focus();
+      const p = screenPoint(e);
+      if (!p) return;
+      S.downBtn = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+      sendCtl('input', { action: 'down', button: S.downBtn, ...p });
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (!S.downBtn) return;
+      sendCtl('input', { action: 'up', button: S.downBtn });
+      S.downBtn = null;
+    });
+
+    wrap.addEventListener('mousemove', (e) => {
+      if (!S.control || !S.downBtn) return;
+      const now = Date.now();
+      if (now - S.lastMove < 50) return;
+      S.lastMove = now;
+      const p = screenPoint(e);
+      if (p) sendCtl('input', { action: 'move', ...p });
+    });
+
+    wrap.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    wrap.addEventListener('wheel', (e) => {
+      if (!S.control) return;
+      e.preventDefault();
+      const p = screenPoint(e);
+      sendCtl('input', {
+        action: 'scroll',
+        delta: e.deltaY < 0 ? 120 : -120,
+        ...(p || {}),
+      });
+    }, { passive: false });
+
+    wrap.addEventListener('keydown', (e) => {
+      if (!S.control) return;
+      if (['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key))
+        e.preventDefault();
+      if (e.repeat) return;
+      sendCtl('input', { action: 'key', vk: e.keyCode, down: true });
+    });
+
+    wrap.addEventListener('keyup', (e) => {
+      if (!S.control) return;
+      sendCtl('input', { action: 'key', vk: e.keyCode, down: false });
+    });
+
+    $$('.kbtn').forEach((b) => b.addEventListener('click', (e) => {
+      e.preventDefault();
+      if (!S.control) { toast('turn control on first'); return; }
+      const keys = (b.dataset.combo || '').split(',').map(Number).filter(Boolean);
+      if (keys.length) sendCtl('input', { action: 'hotkey', keys });
+      wrap.focus();
+    }));
+
+    $('#typeForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = $('#typeInput').value;
+      if (!text) return;
+      if (!S.control) { toast('turn control on first'); return; }
+      sendCtl('input', { action: 'type', text });
+      $('#typeInput').value = '';
+      wrap.focus();
+    });
+
+    window.addEventListener('blur', () => {
+      if (S.downBtn) {
+        sendCtl('input', { action: 'up', button: S.downBtn });
+        S.downBtn = null;
+      }
+    });
+  }
+
+  function screenPoint(ev) {
+    const img = $('#screenImg');
+    const r = img ? img.getBoundingClientRect() : null;
+    if (!r || !r.width || !r.height) return null;
+    const nw = img.naturalWidth || r.width;
+    const nh = img.naturalHeight || r.height;
+    const scale = Math.min(r.width / nw, r.height / nh);
+    const w = nw * scale, h = nh * scale;
+    const left = r.left + (r.width - w) / 2;
+    const top = r.top + (r.height - h) / 2;
+    const nx = Math.min(1, Math.max(0, (ev.clientX - left) / w));
+    const ny = Math.min(1, Math.max(0, (ev.clientY - top) / h));
+    return { nx: Math.round(nx * 10000), ny: Math.round(ny * 10000) };
+  }
+
   function wireModal() {
     $$('.rtab').forEach((t) => t.addEventListener('click', () => {
       switchPane(t.dataset.pane);
@@ -641,6 +917,9 @@
       const act = e.target.closest('[data-act]')?.dataset.act;
       if (!act) return;
       if (act === 'screenshot') run('screenshot', {}, 'capture');
+      if (act === 'control-toggle') {
+        setControl(!S.control);
+      }
       if (act === 'preview-pause') {
         const btn = e.target.closest('[data-act]');
         const paused = btn.dataset.paused === '1';
@@ -673,9 +952,22 @@
       }
     });
 
-    $('#pvInterval').addEventListener('change', (e) => {
-      run('preview', { action: 'set', interval_ms: +e.target.value }, 'preview interval');
+    const previewOpts = () => ({
+      action: 'set',
+      interval_ms: +$('#pvInterval').value,
+      width: +$('#pvWidth').value,
+      quality: S.control ? 60 : 55,
+      paused: false,
     });
+
+    $('#pvInterval').addEventListener('change', () => {
+      if (S.inPreview) sendSilent('preview', previewOpts());
+    });
+    $('#pvWidth').addEventListener('change', () => {
+      if (S.inPreview) sendSilent('preview', previewOpts());
+    });
+
+    wireScreenControls();
 
     $('#filePicker').addEventListener('change', async (ev) => {
       const file = ev.target.files[0];
@@ -703,6 +995,48 @@
   }
 
   // ------------------------------------------------------------------
+  // live frames: [1 byte id-len][id][jpeg]
+  // ------------------------------------------------------------------
+  const decoder = new TextDecoder();
+
+  function handleBinaryFrame(buf) {
+    const b = new Uint8Array(buf);
+    if (b.length < 4) return;
+    const idLen = b[0];
+    if (!idLen || b.length <= idLen + 2) return;
+    const id = decoder.decode(b.subarray(1, 1 + idLen));
+    const jpeg = b.subarray(1 + idLen);
+    applyFrame(id, new Blob([jpeg], { type: 'image/jpeg' }));
+  }
+
+  function applyFrame(id, blob) {
+    const a = S.agents.find((x) => x.id === id);
+    if (a) { a.online = true; a.has_preview = true; a.frame = (a.frame || 0) + 1; }
+
+    const el = S.els.get(id);
+    const img = el?.querySelector('.thumb img');
+    const onScreen = id === S.sel && $('#pane-screen').classList.contains('active');
+
+    if (img) {
+      const url = URL.createObjectURL(blob);
+      const old = S.thumbs[id];
+      img.src = url;
+      S.thumbs[id] = url;
+      if (old) URL.revokeObjectURL(old);
+      el.querySelector('.ghost')?.remove();
+    }
+
+    if (onScreen) {
+      const url = URL.createObjectURL(blob);
+      const prev = S.screenUrl;
+      $('#screenImg').src = url;
+      S.screenUrl = url;
+      $('#screenEmpty').classList.add('hidden');
+      if (prev) URL.revokeObjectURL(prev);
+    }
+  }
+
+  // ------------------------------------------------------------------
   // websocket
   // ------------------------------------------------------------------
   function connect() {
@@ -711,6 +1045,10 @@
     S.ws = ws;
 
     ws.onmessage = (ev) => {
+      if (ev.data instanceof Blob) {
+        ev.data.arrayBuffer().then(handleBinaryFrame).catch(() => {});
+        return;
+      }
       let m;
       try { m = JSON.parse(ev.data); } catch { return; }
 
@@ -727,21 +1065,6 @@
         render();
         if (a.id === S.sel && $('#mHost').textContent !== a.host) {
           $('#mHost').textContent = a.host || 'unknown';
-        }
-        return;
-      }
-
-      if (m.t === 'frame') {
-        const a = S.agents.find((x) => x.id === m.agent_id);
-        if (a) { a.frame = m.n; a.online = true; }
-        const el = S.els.get(m.agent_id);
-        const img = el?.querySelector('.thumb img');
-        if (img) img.src = `/api/agents/${m.agent_id}/preview.jpg?n=${m.n}`;
-        const ghost = el?.querySelector('.ghost');
-        if (ghost) ghost.textContent = '';
-        if (m.agent_id === S.sel && $('#pane-screen').classList.contains('active')) {
-          $('#screenImg').src = `/api/agents/${m.agent_id}/preview.jpg?n=${m.n}`;
-          $('#screenEmpty').classList.add('hidden');
         }
         return;
       }
@@ -775,7 +1098,10 @@
           return;
         }
         if (p?.module === 'upload') return;
-        renderBody(m.body, p?.module || m.module);
+        const mod = p?.module || m.module;
+        if (mod === 'sysstat') { renderSysStat(m.body?.meta); return; }
+        if (!p && (mod === 'input' || mod === 'preview')) return;
+        renderBody(m.body, mod);
         if (p?.module === 'clipboard') $('#clipOut').textContent = m.body?.stdout || '';
         return;
       }
@@ -809,6 +1135,7 @@
   wireToolbar();
   wireGrid();
   wireModal();
+  wireSysProcs();
   quickButtons();
   loadState();
   connect();

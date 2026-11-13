@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>wr-c2</title>
-<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/panel.css">
+<link rel="icon" href="{{ asset('favicon.svg') }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ asset('panel.css') }}">
 </head>
 <body>
 
@@ -99,21 +99,48 @@
 
         <!-- screen -->
         <section class="pane" id="pane-screen">
-          <div class="screenwrap">
-            <img id="screenImg" alt="">
+          <div class="screenwrap" id="screenWrap" tabindex="0">
+            <img id="screenImg" alt="" draggable="false">
             <div id="screenEmpty" class="screen-empty">no frame yet</div>
+            <div id="ctlHint" class="ctl-hint">control off — click “control” to drive this machine</div>
+            <div id="ctlDot" class="ctl-dot hidden"></div>
           </div>
           <div class="screenbar">
-            <button class="btn" data-act="screenshot">capture full quality</button>
-            <button class="btn" data-act="preview-pause">pause stream</button>
-            <label class="sel">interval
+            <button class="btn" id="ctlToggle" data-act="control-toggle">control off</button>
+            <button class="btn" data-act="screenshot">full quality</button>
+            <button class="btn" data-act="preview-pause">pause</button>
+            <label class="sel">fps
               <select id="pvInterval">
-                <option value="1000">1s</option>
-                <option value="2000">2s</option>
-                <option value="4000" selected>4s</option>
-                <option value="8000">8s</option>
+                <option value="120">8</option>
+                <option value="250" selected>4</option>
+                <option value="500">2</option>
+                <option value="1000">1</option>
+                <option value="4000">0.25</option>
               </select>
             </label>
+            <label class="sel">width
+              <select id="pvWidth">
+                <option value="960">960</option>
+                <option value="1280" selected>1280</option>
+                <option value="1600">1600</option>
+              </select>
+            </label>
+          </div>
+          <div class="ctlrow">
+            <div class="combos">
+              <button class="kbtn" data-combo="91">win</button>
+              <button class="kbtn" data-combo="18,9">alt+tab</button>
+              <button class="kbtn" data-combo="17,67">ctrl+c</button>
+              <button class="kbtn" data-combo="17,86">ctrl+v</button>
+              <button class="kbtn" data-combo="17,90">ctrl+z</button>
+              <button class="kbtn" data-combo="17,65">ctrl+a</button>
+              <button class="kbtn" data-combo="27">esc</button>
+              <button class="kbtn" data-combo="13">enter</button>
+            </div>
+            <form id="typeForm" class="typerow">
+              <input id="typeInput" placeholder="type on target…" autocomplete="off" spellcheck="false">
+              <button type="submit">send</button>
+            </form>
           </div>
         </section>
 
@@ -156,7 +183,23 @@
 
         <!-- system -->
         <section class="pane" id="pane-system">
-          <div class="sysgrid" id="sysInfo"></div>
+          <div class="syslive" id="sysLive">
+            <div class="stat"><div class="k">cpu</div><div class="v" id="stCpu">—</div><div class="meter"><i id="stCpuBar"></i></div></div>
+            <div class="stat"><div class="k">memory</div><div class="v" id="stRam">—</div><div class="meter"><i id="stRamBar"></i></div></div>
+            <div class="stat"><div class="k">uptime</div><div class="v" id="stUp">—</div></div>
+            <div class="stat"><div class="k">network</div><div class="v" id="stNet">—</div></div>
+            <div class="stat"><div class="k">power</div><div class="v" id="stPower">—</div></div>
+          </div>
+          <div class="syscols">
+            <div class="syscard">
+              <h4>disks</h4>
+              <div id="sysDisks" class="disklist"></div>
+            </div>
+            <div class="syscard">
+              <h4>top processes <span class="hint" id="sysProcHint">click to kill</span></h4>
+              <div id="sysProcs" class="proclist"></div>
+            </div>
+          </div>
           <div class="quick" id="sysQuick"></div>
           <pre id="sysOut" class="term small"></pre>
         </section>
@@ -174,6 +217,6 @@
 <div id="toast" class="toast"></div>
 <div id="lightbox" class="lightbox hidden"><img id="lightboxImg"></div>
 
-<script src="/static/panel.js"></script>
+<script src="{{ asset('panel.js') }}"></script>
 </body>
 </html>
